@@ -1,5 +1,7 @@
 # eodhd-guard-mcp
 
+<!-- mcp-name: io.github.techfreakworm/eodhd-guard-mcp -->
+
 A guard-first [MCP](https://modelcontextprotocol.io) server for the [EODHD](https://eodhd.com) market-data API: it catches silent failures, says what each price is, and counts what every call costs.
 
 [![CI](https://github.com/techfreakworm/eodhd-guard-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/techfreakworm/eodhd-guard-mcp/actions/workflows/ci.yml)
