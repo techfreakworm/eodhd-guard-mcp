@@ -1,0 +1,13 @@
+[
+  {"type": "Payroll Employment Report", "comparison": null, "period": "Oct", "country": "US", "date": "2026-11-06 13:30:00", "actual": null, "previous": 150, "estimate": 120, "change": 0, "change_percentage": 0},
+  {"type": "Jobless Rate", "comparison": null, "period": "Oct", "country": "US", "date": "2026-11-06 13:30:00", "actual": null, "previous": 4.1, "estimate": 4.2, "change": 0, "change_percentage": 0},
+  {"type": "Hourly Pay Index", "comparison": "yoy", "period": "Oct", "country": "US", "date": "2026-11-06 13:30:00", "actual": null, "previous": 3.9, "estimate": 3.8, "change": 0, "change_percentage": 0},
+  {"type": "Hourly Pay Index", "comparison": "mom", "period": "Oct", "country": "US", "date": "2026-11-06 13:30:00", "actual": null, "previous": 0.3, "estimate": 0.3, "change": 0, "change_percentage": 0},
+  {"type": "New Jobless Filings", "comparison": null, "period": "Oct/31", "country": "US", "date": "2026-11-05 13:30:00", "actual": null, "previous": 220, "estimate": 218, "change": 0, "change_percentage": 0},
+  {"type": "Central Bank Governor Doe Speech", "comparison": null, "period": null, "country": "US", "date": "2026-11-04 17:15:00", "actual": null, "previous": null, "estimate": null, "change": 0, "change_percentage": 0},
+  {"type": "Services Purchasing Index", "comparison": null, "period": "Oct", "country": "US", "date": "2026-11-04 15:00:00", "actual": null, "previous": 51.5, "estimate": 52, "change": 0, "change_percentage": 0},
+  {"type": "Household Borrowing", "comparison": null, "period": "Sep", "country": "US", "date": "2026-11-03 20:00:00", "actual": 12.1, "previous": null, "estimate": null, "change": 0, "change_percentage": 0},
+  {"type": "Central Bank Rate Decision", "comparison": null, "period": null, "country": "US", "date": "2026-11-03 19:00:00", "actual": 4.5, "previous": 4.5, "estimate": 4.5, "change": 0, "change_percentage": 0},
+  {"type": "Vacancy Survey Openings", "comparison": null, "period": "Sep", "country": "US", "date": "2026-11-03 15:00:00", "actual": 7.4, "previous": 7.2, "estimate": 7.3, "change": 0.2, "change_percentage": 2.7778},
+  {"type": "General Election Day", "comparison": null, "period": null, "country": "US", "date": "2026-11-03 00:00:00", "actual": null, "previous": null, "estimate": null, "change": 0, "change_percentage": 0}
+]

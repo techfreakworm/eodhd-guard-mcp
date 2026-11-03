@@ -1,0 +1,68 @@
+[
+  {
+    "date": "2026-11-03T13:05:12+00:00",
+    "title": "ACME beats third-quarter estimates as rocket sales climb",
+    "content": "ACME Rockets reported third-quarter revenue of 4.2 billion dollars on Tuesday, ahead of analyst forecasts, as demand for its reusable launch vehicles kept growing.\n\nChief executive Wile Coyote said the order book now covers 41 launches through 2028, and that the company expects to add a second assembly line next spring.\n\nShares of the company rose in early trading. Analysts at the fictional Roadrunner Research raised their price target.\n\nShow Replies",
+    "link": "https://news.example.com/acme-beats-estimates",
+    "symbols": ["ACME.US", "GLOBEX.LSE", "HOOLI.US", "WONKA.US"],
+    "tags": ["EARNINGS", "ROCKETS", "SALES MOMENTUM"],
+    "sentiment": {"polarity": 0.91, "neg": 0.02, "neu": 0.85, "pos": 0.13}
+  },
+  {
+    "date": "2026-11-03T09:30:00+00:00",
+    "title": "ACME shares slide after guidance cut",
+    "content": "Shares of ACME Rockets fell sharply after the company cut its full-year guidance, citing a delay at its main supplier. The stock is down 12 percent this week.\n\nShow Replies",
+    "link": "https://news.example.com/acme-guidance-cut",
+    "symbols": ["ACME.US"],
+    "tags": ["GUIDANCE", "TARGET-CUT"],
+    "sentiment": {"polarity": 0.97, "neg": 0.08, "neu": 0.8, "pos": 0.12}
+  },
+  {
+    "date": "2026-11-02T21:15:40+00:00",
+    "title": "Rocket makers lobby for a longer launch window",
+    "content": "Industry groups asked regulators on Monday to extend the launch licensing window from 30 to 60 days. The proposal is opposed by two environmental groups.\n\nKeep Reading",
+    "link": "https://news.example.com/launch-window-lobby",
+    "symbols": ["ACME.US", "GLOBEX.LSE"],
+    "tags": ["REGULATION"],
+    "sentiment": {"polarity": 0.12, "neg": 0.04, "neu": 0.9, "pos": 0.06}
+  },
+  {
+    "date": "2026-11-02T08:00:00+00:00",
+    "title": "Fourteen companies sign a satellite-launch framework",
+    "content": "Fourteen listed companies signed a framework agreement on shared launch capacity.",
+    "link": "https://news.example.com/launch-framework",
+    "symbols": [
+      "ALPHA.US", "BRAVO.US", "CHARLIE.US", "DELTA.US", "ECHO.US", "FOXTROT.US", "GOLF.US",
+      "HOTEL.US", "INDIA.US", "JULIET.US", "KILO.US", "LIMA.US", "WONKA.US", "ZULU.US"
+    ],
+    "tags": ["INFRASTRUCTURE", "LAUNCH-SERVICES"],
+    "sentiment": {"polarity": 0.4, "neg": 0.03, "neu": 0.87, "pos": 0.1}
+  },
+  {
+    "date": "2026-10-31T16:45:10+00:00",
+    "title": "ACME opens a second launch site",
+    "content": "ACME opened a second launch site on Saturday. The site will host twelve launches a year.",
+    "link": "https://news.example.com/acme-second-site",
+    "symbols": ["ACME.US"],
+    "tags": ["ROCKETS"],
+    "sentiment": {"polarity": 1, "neg": 0, "neu": 0.9, "pos": 0.1}
+  },
+  {
+    "date": "2026-10-29T12:00:00+00:00",
+    "title": "ACME names a new finance chief",
+    "content": "New CFO named.",
+    "link": "https://news.example.com/acme-new-cfo",
+    "symbols": ["ACME.US"],
+    "tags": [],
+    "sentiment": {"polarity": 0.0, "neg": 0.0, "neu": 1.0, "pos": 0.0}
+  },
+  {
+    "date": "2026-10-28T07:30:00+00:00",
+    "title": "Analysts split on ACME ahead of its results",
+    "content": null,
+    "link": "https://news.example.com/acme-analysts-split",
+    "symbols": ["ACME.US", "HOOLI.US"],
+    "tags": ["EARNINGS"],
+    "sentiment": {"polarity": -0.2, "neg": 0.07, "neu": 0.88, "pos": 0.05}
+  }
+]

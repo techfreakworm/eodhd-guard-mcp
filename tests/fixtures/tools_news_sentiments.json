@@ -1,0 +1,14 @@
+{
+  "ACME.US": [
+    {"date": "2026-11-03", "count": 6, "normalized": 0.6},
+    {"date": "2026-11-02", "count": 10, "normalized": -0.2},
+    {"date": "2026-11-01", "count": 2, "normalized": 0.9},
+    {"date": "2026-10-31", "count": 4, "normalized": 0.1},
+    {"date": "2026-10-30", "count": 3, "normalized": -0.5},
+    {"date": "2026-10-29", "count": 1, "normalized": -0.8}
+  ],
+  "GLOBEX.LSE": [
+    {"date": "2026-11-03", "count": 5, "normalized": 0.25},
+    {"date": "2026-11-02", "count": 5, "normalized": 0.75}
+  ]
+}

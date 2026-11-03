@@ -76,7 +76,7 @@ def budget_low_warning(deps: Deps) -> ToolWarning | None:
 
 def register_all(server: MCPServer, deps: Deps) -> None:
     """Register every tool on the server."""
-    from eodhd_guard_mcp.tools import calendar, fundamentals, prices, quotes, reference, usage
+    from eodhd_guard_mcp.tools import calendar, fundamentals, news, prices, quotes, reference, usage
 
-    for module in (prices, quotes, fundamentals, calendar, reference, usage):
+    for module in (prices, quotes, fundamentals, calendar, news, reference, usage):
         module.register(server, deps)

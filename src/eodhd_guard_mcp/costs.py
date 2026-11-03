@@ -37,6 +37,22 @@ _ENDPOINTS = (
     EndpointCost("exchanges-list", 1),
     EndpointCost("exchange-symbol-list", 1),
     EndpointCost("search", 1),
+    EndpointCost(
+        "news",
+        5,
+        per_symbol=True,
+        note=(
+            "measured for one ticker or a topic; several tickers are modelled as 5 each from EODHD's "
+            "documentation, and a topic counts as one"
+        ),
+    ),
+    EndpointCost(
+        "sentiments",
+        5,
+        per_symbol=True,
+        note="measured for one ticker; several tickers are modelled as 5 each",
+    ),
+    EndpointCost("economic-events", 1, note="1 per request whatever the window, country or limit"),
     EndpointCost("user", 0, note="account counters"),
 )
 

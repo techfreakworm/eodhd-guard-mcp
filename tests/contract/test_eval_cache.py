@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import unicodedata
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -353,3 +354,188 @@ async def test_no_bars_during_the_session_is_explained(
     result = await mcp_client.call_tool("get_intraday_prices", {"symbol": "AAPL.US", "interval": "5m"})
     assert not result.is_error
     assert "INTRADAY_NOT_SAME_DAY" in codes(result)
+
+
+# News, sentiment and economic events
+
+
+def answer_files(folder: str, pattern: str) -> list[Path]:
+    return sorted(Path(CACHE, folder).glob(pattern)) if CACHE else []
+
+
+NEWS_BY_SYMBOL = answer_files("news", "news__*.json")
+NEWS_BY_TOPIC = answer_files("news", "news_*__*.json")
+SENTIMENT_ANSWERS = answer_files("sentiments", "sentiments_*__*.json")
+EVENT_ANSWERS = answer_files("economic-events", "economic-events_*__*.json")
+
+
+def wrapper_and_rows(path: Path) -> tuple[Wrapper, Any]:
+    wrapper = json.loads(path.read_text(encoding="utf-8"))
+    return wrapper, json.loads(wrapper["body"])
+
+
+def hidden_characters(text: str, *, allow: str = "") -> bool:
+    """Control or format characters (line breaks, zero-width marks, word joiners) not listed in ``allow``."""
+    return any(unicodedata.category(ch) in ("Cc", "Cf") and ch not in allow for ch in text)
+
+
+def after(clock: FixedClock, day: date) -> None:
+    """Move the clock to noon UTC on the day after ``day``, so that ``day`` is in the past."""
+    target = datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc) + timedelta(days=1)
+    clock.advance(seconds=(target - clock()).total_seconds())
+
+
+def sent_on_or_after(rows: list[dict[str, Any]], first: str) -> list[dict[str, Any]]:
+    return [row for row in rows if row["date"][:10] >= first]
+
+
+@pytest.mark.parametrize("path", NEWS_BY_SYMBOL, ids=lambda path: path.stem[:14])
+async def test_a_news_answer_is_cleaned_ordered_priced_and_flagged(
+    path: Path, mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    wrapper, raw = wrapper_and_rows(path)
+    after(clock, date(2026, 11, 2))
+    # EODHD lists an article's tickers alphabetically; ask for the last one of the first article.
+    target = raw[0]["symbols"][-1]
+    serve(mock_api, "news", wrapper)
+    result = await mcp_client.call_tool("get_news", {"symbols": [target], "start": "2026-08-05"})
+    assert not result.is_error, result.content
+    body = result.structured_content
+    assert body["meta"]["cost"] == 5
+    assert {"SENTIMENT_UNRELIABLE", "TRUNCATED"} <= set(codes(result))
+    assert any("written by third parties" in note for note in body["meta"]["notes"])
+
+    kept = sent_on_or_after(raw, "2026-08-05")
+    if len(kept) < len(raw):
+        trimmed = next(w for w in body["warnings"] if w["code"] == "RANGE_TRIMMED")
+        assert trimmed["details"]["dropped"] == len(raw) - len(kept)
+    items = body["data"]["articles"]
+    assert len(items) == len(kept)
+    dates = [item["date"] for item in items]
+    assert dates == sorted(dates, reverse=True)
+    by_link = {row["link"].lower(): row for row in raw}
+    for item in items:
+        source = by_link[item["link"].lower()]
+        assert item["date"].endswith("Z")
+        assert len(item["excerpt"]) <= 403
+        assert len(item["title"]) <= 303
+        assert not hidden_characters(item["excerpt"] + item["title"])
+        assert len(item["symbols"]) <= 10
+        assert item["symbol_count"] == len(set(source["symbols"]))
+        if target in source["symbols"]:
+            assert item["symbols"][0] == target
+        assert item["tags"] == list(dict.fromkeys(source["tags"]))
+        assert set(item["sentiment"]) == {"polarity", "neg", "neu", "pos"}
+
+
+@pytest.mark.parametrize("path", NEWS_BY_SYMBOL, ids=lambda path: path.stem[:14])
+async def test_news_content_keeps_paragraphs_and_stays_under_the_cap(
+    path: Path, mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    wrapper, raw = wrapper_and_rows(path)
+    after(clock, date(2026, 11, 2))
+    serve(mock_api, "news", wrapper)
+    result = await mcp_client.call_tool(
+        "get_news", {"symbols": [raw[0]["symbols"][0]], "start": "2026-08-05", "include_content": True}
+    )
+    assert not result.is_error, result.content
+    excerpts = [item["excerpt"] for item in result.structured_content["data"]["articles"]]
+    assert excerpts
+    for text in excerpts:
+        assert len(text) <= 4003
+        assert not hidden_characters(text, allow="\n")
+        assert "\n\n\n" not in text
+    assert any("\n\n" in text for text in excerpts)
+
+
+@pytest.mark.parametrize("path", NEWS_BY_TOPIC, ids=lambda path: path.stem[:14])
+async def test_a_topic_answer_costs_five_calls_and_may_have_more_pages(
+    path: Path, mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    wrapper, raw = wrapper_and_rows(path)
+    topic = path.name.removeprefix("news_").split("__")[0]
+    after(clock, date(2026, 11, 2))
+    serve(mock_api, "news", wrapper)
+    result = await mcp_client.call_tool("get_news", {"topic": topic})
+    assert not result.is_error, result.content
+    body = result.structured_content
+    assert body["meta"]["cost"] == 5
+    assert body["data"]["topic"] == topic
+    assert "symbols" not in body["data"]
+    assert body["data"]["count"] == len(raw)
+    assert ("TRUNCATED" in codes(result)) == (len(raw) >= 10)
+    assert mock_api.requests[0].params["t"] == topic
+    assert "s" not in mock_api.requests[0].params
+
+
+@pytest.mark.parametrize("path", SENTIMENT_ANSWERS, ids=lambda path: path.stem[:22])
+async def test_a_sentiment_answer_is_ordered_weighted_flagged_and_priced(
+    path: Path, mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    wrapper, raw = wrapper_and_rows(path)
+    symbol = path.name.removeprefix("sentiments_").split("__")[0]
+    rows = raw[symbol]
+    days = sorted(row["date"] for row in rows)
+    after(clock, date.fromisoformat(days[-1]))
+    serve(mock_api, "sentiments", wrapper)
+    result = await mcp_client.call_tool(
+        "get_sentiment", {"symbols": [symbol, "NOSUCHCO.US"], "start": days[0]}
+    )
+    assert not result.is_error, result.content
+    body = result.structured_content
+    assert body["meta"]["cost"] == 10
+    assert "SENTIMENT_UNRELIABLE" in codes(result)
+    entry, absent = body["data"]["symbols"]
+    assert (entry["symbol"], entry["status"]) == (symbol, "ok")
+    assert (absent["symbol"], absent["status"], absent["days"]) == ("NOSUCHCO.US", "no_data", [])
+    assert [day["date"] for day in entry["days"]] == days
+    by_date = {row["date"]: row for row in rows}
+    for day in entry["days"]:
+        assert (day["articles"], day["score"]) == (
+            by_date[day["date"]]["count"],
+            by_date[day["date"]]["normalized"],
+        )
+        assert day.get("low_count", False) == (day["articles"] < 3)
+    assert entry["articles"] == sum(row["count"] for row in rows)
+    weighted = sum(row["normalized"] * row["count"] for row in rows) / entry["articles"]
+    assert entry["average_score"] == round(weighted, 4)
+    assert ("LOW_ARTICLE_COUNT" in codes(result)) == any(row["count"] < 3 for row in rows)
+
+
+@pytest.mark.parametrize("path", EVENT_ANSWERS, ids=lambda path: path.stem[:24])
+async def test_economic_events_are_sorted_in_utc_and_changes_need_an_actual(
+    path: Path, mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    wrapper, raw = wrapper_and_rows(path)
+    country = path.name.removeprefix("economic-events_").split("__")[0]
+    days = sorted(row["date"][:10] for row in raw)
+    serve(mock_api, "economic-events", wrapper)
+    arguments = {"country": country, "start": days[0], "end": days[-1], "max_rows": 1000}
+    result = await mcp_client.call_tool("get_economic_events", arguments)
+    assert not result.is_error, result.content
+    body = result.structured_content
+    rows = body["data"]["events"]
+    assert (body["meta"]["cost"], mock_api.count("economic-events")) == (1, 1)
+    assert body["data"]["total"] == len(rows) == len(raw)
+    assert ("TRUNCATED" in codes(result)) == (len(raw) >= 1000)
+
+    # The time is EODHD's own text read as UTC, and the rows run oldest first.
+    stamps = [row["datetime_utc"] for row in rows]
+    assert stamps == sorted(stamps)
+    assert stamps == sorted(row["date"].replace(" ", "T") + "Z" for row in raw)
+
+    # EODHD sends 0 for change and change_percentage while there is no actual; the tool shows null.
+    assert all(row["change"] == 0 and row["change_percentage"] == 0 for row in raw if row["actual"] is None)
+    unknown = sum(1 for row in raw if row["actual"] is None or row["previous"] is None)
+    assert sum(1 for row in rows if row["change"] is None) == unknown
+    assert sum(1 for row in rows if row["change_pct"] is None) == unknown
+    assert all(row["comparison"] is None or row["comparison"] == row["comparison"].lower() for row in rows)
+    assert all(row["country"] == country for row in rows)
+
+    # A filter on the event name is served from the cache, for nothing.
+    needle = rows[0]["event"].split()[0].lower()
+    again = await mcp_client.call_tool("get_economic_events", {**arguments, "event": needle})
+    assert not again.is_error
+    assert again.structured_content["meta"]["cost"] == 0
+    assert 1 <= again.structured_content["data"]["total"] <= len(raw)
+    assert mock_api.count("economic-events") == 1
