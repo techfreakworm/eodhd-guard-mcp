@@ -150,12 +150,22 @@ class EODHDClient:
         self._base_url = settings.base_url.rstrip("/")
         # Cost of requests that passed the budget check but are not in the ledger yet.
         self._pending = 0
-        self._http = httpx2.AsyncClient(
-            transport=transport,
-            timeout=httpx2.Timeout(settings.timeout_s),
-            headers={"User-Agent": f"eodhd-guard-mcp/{__version__}"},
-            follow_redirects=False,
-        )
+        self._transport = transport
+        self._http: httpx2.AsyncClient | None = None
+
+    def _connection(self) -> httpx2.AsyncClient:
+        """The HTTP client, created on first use and again after ``aclose``.
+
+        The server's lifespan closes it when a session ends, and a later session opens a new one.
+        """
+        if self._http is None:
+            self._http = httpx2.AsyncClient(
+                transport=self._transport,
+                timeout=httpx2.Timeout(self._settings.timeout_s),
+                headers={"User-Agent": f"eodhd-guard-mcp/{__version__}"},
+                follow_redirects=False,
+            )
+        return self._http
 
     async def get(
         self,
@@ -240,7 +250,10 @@ class EODHDClient:
         return {name: self._plain(body.get(name)) for name in ACCOUNT_FIELDS}
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        """Close the HTTP client. The next request opens a new one."""
+        http, self._http = self._http, None
+        if http is not None:
+            await http.aclose()
 
     @staticmethod
     def _segments(path: str) -> list[str]:
@@ -343,7 +356,7 @@ class EODHDClient:
         """One request. Only the exception class survives, and every HTTP answer is recorded."""
         started = time.perf_counter()
         try:
-            response = await self._http.get(url, params=query)
+            response = await self._connection().get(url, params=query)
         except _HTTPX_ERRORS as exc:
             return _Answer(
                 status=0,

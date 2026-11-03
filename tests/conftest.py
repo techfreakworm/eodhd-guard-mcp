@@ -80,7 +80,8 @@ async def deps(
 
 
 @pytest.fixture
-def server(deps: Deps) -> MCPServer:
+def server(deps: Deps, isolated_logging: None) -> MCPServer:
+    """``build_server`` installs log redaction process-wide; ``isolated_logging`` undoes it after."""
     from eodhd_guard_mcp.server import build_server
 
     return build_server(deps=deps)
