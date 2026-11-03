@@ -1,0 +1,16 @@
+title = "eodhd-guard-mcp gitleaks config"
+
+# Start from the built-in gitleaks rules.
+[extend]
+useDefault = true
+
+# The only exception: the fake API key that the test suite uses, and only inside tests/. Both
+# conditions must hold, so every other string in tests/ is still scanned, and the fake key is not
+# excused anywhere else. [[allowlists]] needs gitleaks 8.25 or later; CI and the pre-commit hook
+# both pin 8.30.1.
+[[allowlists]]
+description = "Fake API key used by the test suite"
+condition = "AND"
+paths = ['''(^|[/\\])tests[/\\]''']
+regexTarget = "match"
+regexes = ['''test-key-0123456789''']

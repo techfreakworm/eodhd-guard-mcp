@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest a new tool, parameter or guard.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This server is deliberately narrow: a small set of EODHD endpoints, each with guards. A request is easiest to accept when it names a failure an AI assistant cannot see today (a silent empty answer, a mislabelled price, a hidden cost), or an endpoint that fits that approach. For breadth, EODHD's own MCP server covers much more of the API.
+
+        Do not paste API keys or raw EODHD responses.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Say what goes wrong or what you cannot do today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What do you suggest?
+      description: A tool name, its parameters and defaults, and what it should return. State the cost in API calls if you know it.
+    validations:
+      required: true
+  - type: textarea
+    id: guard
+    attributes:
+      label: Which silent failure or cost problem does it guard against?
+      description: For example "the endpoint answers HTTP 200 with an empty list for delisted codes".
+  - type: input
+    id: endpoint
+    attributes:
+      label: EODHD endpoint
+      description: The path only, without a key or a symbol. Leave empty if you are not sure.
+      placeholder: calendar/earnings
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: For example an existing tool with different parameters, or EODHD's own MCP server.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked that no existing tool or open issue covers this.
+          required: true
+        - label: I removed API keys and raw EODHD responses from this request.
+          required: true
+        - label: I am willing to help test or implement it.

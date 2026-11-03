@@ -1,0 +1,95 @@
+name: Bug report
+description: A tool returned wrong, missing or misleading output, or the server misbehaved.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem.
+
+        **Never paste an API key, account details or a raw EODHD response.** EODHD's licence is for personal use, and its data must not be redistributed. Describe the shape of a result instead: which fields, which warning codes, which error code. If a key appears anywhere in your output, replace it with `***` and rotate the key.
+
+        Questions about your EODHD plan or billing, and data errors at the source, belong with EODHD support. This project is not affiliated with EODHD.
+  - type: dropdown
+    id: tool
+    attributes:
+      label: Tool
+      description: Which tool misbehaved?
+      options:
+        - get_eod_prices
+        - get_intraday_prices
+        - get_quote
+        - get_fundamentals
+        - get_earnings_calendar
+        - get_dividends
+        - get_dividend_calendar
+        - get_splits
+        - get_split_calendar
+        - list_exchanges
+        - list_exchange_symbols
+        - search_symbols
+        - check_symbol
+        - get_usage
+        - Server start-up or configuration
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: arguments
+    attributes:
+      label: Arguments
+      description: The arguments of the call, exactly as sent. Symbols and dates are fine. Leave this empty for a start-up problem.
+      render: json
+  - type: textarea
+    id: warnings
+    attributes:
+      label: Warnings and errors returned
+      description: The warning codes, or the error code and message. Copy the text, and remove anything that looks like a key.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Describe the result without pasting EODHD data. For example, "the last bar was three sessions old and there was no STALE_DATA warning".
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `eodhd-guard-mcp --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - stdio
+        - streamable-http
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Python, operating system and MCP client
+      placeholder: Python 3.12, macOS 15, Claude Code
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed API keys, account details and raw EODHD responses from this report.
+          required: true
+        - label: This is not a security vulnerability. Those go through private vulnerability reporting, described in SECURITY.md.
+          required: true

@@ -117,7 +117,7 @@ class Settings:
 | `EODHD_GUARD_TIMEOUT` | seconds, > 0 | `30` |
 | `EODHD_GUARD_MAX_RETRIES` | integer 0..5 | `2` |
 | `EODHD_GUARD_ALLOW_UNCOVERED` | bool | `off` |
-| `EODHD_GUARD_BASE_URL` | API base, for tests and proxies | `https://eodhd.com/api` |
+| `EODHD_GUARD_BASE_URL` | API base, for tests and proxies; must be https unless the host is localhost | `https://eodhd.com/api` |
 | `EODHD_GUARD_LOG_LEVEL` | DEBUG..CRITICAL | `WARNING` |
 
 An invalid value raises `GuardError(CONFIG_ERROR)` naming the variable and the accepted values. A missing
@@ -286,7 +286,8 @@ What `get()` does, in order:
 8. Parse the JSON. Anything that isn't JSON is `BAD_RESPONSE`.
 
 Exceptions from httpx2 must never escape: their text holds the URL, and the URL holds the key. Every error
-message passes through `redact()`.
+message passes through `redact()`. Redirects are not followed (`follow_redirects=False`), so the key is never
+sent to another host.
 
 ### envelope.py
 
@@ -327,6 +328,7 @@ Warning codes, all listed in `WarningCode(str, Enum)`:
 | `CALENDAR_TIMING_UNRELIABLE` | earnings | before/after-market flags were often wrong in checks |
 | `NO_CALENDAR_ROWS` | earnings | requested symbols with no row in the window |
 | `PARTIAL_COVERAGE` | earnings, search, exchanges | a market with dates only, or a listed-but-empty exchange |
+| `NOT_COVERED` | earnings, quote | a requested symbol is on a market EODHD does not cover (the call still answers for the others) |
 | `POSSIBLY_INACTIVE` | search | a line's previous close is old: it may be delisted or renamed |
 | `ODD_SPLIT_RATIO` | splits | a ratio that looks like a spin-off or rights adjustment, not a split |
 | `EMPTY_RESULT` | lists | a legitimately empty answer (for example no dividends) |
@@ -647,7 +649,7 @@ Every tool appends `BUDGET_LOW` when 80% or more of the budget is spent (`build_
 
 ### check_symbol(symbol, include_quote=False, find_successor=True)
 
-- 1 to 4 calls.
+- 0 to 4 calls (0 for a market EODHD does not cover).
 - Steps:
   1. Coverage check. A gap returns status `not_covered` and costs 0.
   2. `eod/{symbol}` for the last 14 days. A 404 means `not_found`; an empty answer or stale data means
@@ -681,8 +683,14 @@ Every tool appends `BUDGET_LOW` when 80% or more of the budget is spent (`build_
 `build_deps(settings, *, transport=None, clock=None) -> Deps` creates the ledger, cache, budget and client.
 `Deps` is a dataclass holding `settings`, `client`, `ledger`, `cache`, `budget` and `clock`, where the clock
 returns an aware UTC `datetime`. `build_server(settings=None, *, deps=None) -> MCPServer` creates
-`MCPServer("eodhd-guard-mcp", version=__version__, instructions=INSTRUCTIONS, lifespan=...)`, calls
-`register_all(server, deps)` and closes the client, ledger and cache in the lifespan exit.
+`MCPServer("eodhd-guard-mcp", version=__version__, instructions=INSTRUCTIONS, log_level=settings.log_level,
+lifespan=...)`, calls `register_all(server, deps)` and closes the client, ledger and cache in the lifespan
+exit.
+
+Logging is a key-leak vector. `MCPServer.__init__` calls `logging.basicConfig()` at its `log_level` (the SDK
+default is INFO), and httpx2 logs every request URL, key included, at INFO. So `build_server` passes
+`settings.log_level` (WARNING by default) and calls `install_log_redaction(settings.api_key)` *after*
+constructing the server. That holds even when the server is embedded without the CLI.
 
 `INSTRUCTIONS` (kept under 1,500 characters) tells the model:
 

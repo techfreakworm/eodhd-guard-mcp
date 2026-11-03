@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "eodhd-guard": {
+      "command": "eodhd-guard-mcp",
+      "args": [],
+      "env": {
+        "EODHD_API_KEY_FILE": "/Users/you/.config/eodhd-guard-mcp/api_key"
+      }
+    }
+  }
+}
