@@ -1,0 +1,129 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eodhd-guard-mcp"
+dynamic = ["version"]
+description = "A guard-first MCP server for the EODHD market-data API: it catches silent failures, says what each price is, and counts what every call costs."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Mayank Gupta" }]
+keywords = ["mcp", "model-context-protocol", "eodhd", "market-data", "stocks", "finance", "llm", "ai-agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Financial and Insurance Industry",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Office/Business :: Financial :: Investment",
+  "Typing :: Typed",
+]
+dependencies = [
+  "mcp>=2.3,<3",
+  "httpx2>=2.10",
+  "pydantic>=2.12",
+  "tzdata; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=5",
+  "ruff>=0.15",
+  "mypy>=1.15",
+]
+
+[project.scripts]
+eodhd-guard-mcp = "eodhd_guard_mcp.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/techfreakworm/eodhd-guard-mcp"
+Issues = "https://github.com/techfreakworm/eodhd-guard-mcp/issues"
+Changelog = "https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "src/eodhd_guard_mcp/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eodhd_guard_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/",
+  "tests/",
+  "docs/",
+  "README.md",
+  "LICENSE",
+  "CHANGELOG.md",
+  "CONTRIBUTING.md",
+  "SECURITY.md",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+  "live: calls the real EODHD API (needs EODHD_API_KEY and EODHD_GUARD_LIVE=1)",
+  "contract: reads a local cache of real responses (needs EODHD_GUARD_EVAL_CACHE)",
+]
+
+[tool.coverage.run]
+source = ["eodhd_guard_mcp"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+  "if __name__ == .__main__.:",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",   # pycodestyle
+  "F",        # pyflakes
+  "I",        # isort
+  "B",        # bugbear
+  "UP",       # pyupgrade
+  "SIM",      # simplify
+  "S",        # bandit
+  "N",        # naming
+  "C4",       # comprehensions
+  "PT",       # pytest style
+  "T20",      # no print in the package
+  "ASYNC",    # async pitfalls
+  "RUF",      # ruff-specific
+  "PLE",      # pylint errors
+]
+ignore = [
+  "S608",     # no SQL is built from user input; the queries are fixed strings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S108", "PLR2004", "T20"]
+"src/eodhd_guard_mcp/cli.py" = ["T20"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
+packages = ["eodhd_guard_mcp"]
+warn_unreachable = true

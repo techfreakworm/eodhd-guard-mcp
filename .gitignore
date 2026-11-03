@@ -1,0 +1,17 @@
+# Local-only material (EODHD eval cache holds licensed data; never commit)
+_local/
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
