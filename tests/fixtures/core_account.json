@@ -1,0 +1,13 @@
+{
+  "name": "Test Person",
+  "email": "test.person@example.invalid",
+  "subscriptionType": "synthetic-plan",
+  "paymentMethod": "Synthetic card ending 0000",
+  "apiRequests": 37,
+  "apiRequestsDate": "2026-11-03",
+  "dailyRateLimit": 5000,
+  "extraLimit": 0,
+  "inviteToken": "invite-synthetic-0001",
+  "inviteTokenClicked": 0,
+  "subscriptionMode": "synthetic"
+}
