@@ -1,0 +1,168 @@
+{
+ "General": {
+  "Code": "GLBLX",
+  "Type": "FUND",
+  "Name": "Globex Balanced Fund",
+  "Exchange": "NMFQS",
+  "CurrencyCode": "USD",
+  "Description": "An invented balanced fund used in tests.",
+  "UpdatedAt": "2026-10-31"
+ },
+ "MutualFund_Data": {
+  "Fund_Summary": "Seeks growth and income from a mix of stocks and bonds.",
+  "Fund_Family": "Globex Funds",
+  "Fund_Category": "Allocation--50% to 70% Equity",
+  "Inception_Date": "1998-07-01",
+  "Portfolio_Net_Assets": "8900000000",
+  "Expense_Ratio": "0.55",
+  "Asset_Allocation": {
+   "Stock": "62.1",
+   "Bond": "35.2",
+   "Cash": "2.7"
+  },
+  "Top_Holdings": [
+   {
+    "Name": "Fund Holding 0",
+    "Weight": 4.0
+   },
+   {
+    "Name": "Fund Holding 1",
+    "Weight": 3.7
+   },
+   {
+    "Name": "Fund Holding 2",
+    "Weight": 3.4
+   },
+   {
+    "Name": "Fund Holding 3",
+    "Weight": 3.1
+   },
+   {
+    "Name": "Fund Holding 4",
+    "Weight": 2.8
+   }
+  ],
+  "Holdings": [
+   {
+    "Name": "Fund Holding 0",
+    "Weight": 4.0
+   },
+   {
+    "Name": "Fund Holding 1",
+    "Weight": 3.93
+   },
+   {
+    "Name": "Fund Holding 2",
+    "Weight": 3.86
+   },
+   {
+    "Name": "Fund Holding 3",
+    "Weight": 3.79
+   },
+   {
+    "Name": "Fund Holding 4",
+    "Weight": 3.72
+   },
+   {
+    "Name": "Fund Holding 5",
+    "Weight": 3.65
+   },
+   {
+    "Name": "Fund Holding 6",
+    "Weight": 3.58
+   },
+   {
+    "Name": "Fund Holding 7",
+    "Weight": 3.51
+   },
+   {
+    "Name": "Fund Holding 8",
+    "Weight": 3.44
+   },
+   {
+    "Name": "Fund Holding 9",
+    "Weight": 3.37
+   },
+   {
+    "Name": "Fund Holding 10",
+    "Weight": 3.3
+   },
+   {
+    "Name": "Fund Holding 11",
+    "Weight": 3.23
+   },
+   {
+    "Name": "Fund Holding 12",
+    "Weight": 3.16
+   },
+   {
+    "Name": "Fund Holding 13",
+    "Weight": 3.09
+   },
+   {
+    "Name": "Fund Holding 14",
+    "Weight": 3.02
+   },
+   {
+    "Name": "Fund Holding 15",
+    "Weight": 2.95
+   },
+   {
+    "Name": "Fund Holding 16",
+    "Weight": 2.88
+   },
+   {
+    "Name": "Fund Holding 17",
+    "Weight": 2.81
+   },
+   {
+    "Name": "Fund Holding 18",
+    "Weight": 2.74
+   },
+   {
+    "Name": "Fund Holding 19",
+    "Weight": 2.67
+   },
+   {
+    "Name": "Fund Holding 20",
+    "Weight": 2.6
+   },
+   {
+    "Name": "Fund Holding 21",
+    "Weight": 2.53
+   },
+   {
+    "Name": "Fund Holding 22",
+    "Weight": 2.46
+   },
+   {
+    "Name": "Fund Holding 23",
+    "Weight": 2.39
+   },
+   {
+    "Name": "Fund Holding 24",
+    "Weight": 2.32
+   },
+   {
+    "Name": "Fund Holding 25",
+    "Weight": 2.25
+   },
+   {
+    "Name": "Fund Holding 26",
+    "Weight": 2.18
+   },
+   {
+    "Name": "Fund Holding 27",
+    "Weight": 2.11
+   },
+   {
+    "Name": "Fund Holding 28",
+    "Weight": 2.04
+   },
+   {
+    "Name": "Fund Holding 29",
+    "Weight": 1.97
+   }
+  ]
+ }
+}

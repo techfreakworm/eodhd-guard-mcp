@@ -1,0 +1,122 @@
+[
+ {
+  "date": "2024-02-08",
+  "declarationDate": null,
+  "recordDate": null,
+  "paymentDate": null,
+  "period": null,
+  "value": 0.2,
+  "unadjustedValue": 0.4,
+  "currency": "USD"
+ },
+ {
+  "date": "2024-05-09",
+  "declarationDate": "2024-04-25",
+  "recordDate": "2024-05-10",
+  "paymentDate": "2024-05-24",
+  "period": "Quarterly",
+  "value": 0.2,
+  "unadjustedValue": 0.4,
+  "currency": "USD"
+ },
+ {
+  "date": "2024-08-08",
+  "declarationDate": "2024-07-25",
+  "recordDate": "2024-08-09",
+  "paymentDate": "2024-08-23",
+  "period": "Quarterly",
+  "value": 0.21,
+  "unadjustedValue": 0.42,
+  "currency": "USD"
+ },
+ {
+  "date": "2024-11-07",
+  "declarationDate": "2024-10-24",
+  "recordDate": "2024-11-08",
+  "paymentDate": "2024-11-22",
+  "period": "Quarterly",
+  "value": 0.21,
+  "unadjustedValue": 0.42,
+  "currency": "USD"
+ },
+ {
+  "date": "2025-02-06",
+  "declarationDate": "2025-01-23",
+  "recordDate": "2025-02-07",
+  "paymentDate": "2025-02-21",
+  "period": "Quarterly",
+  "value": 0.22,
+  "unadjustedValue": 0.44,
+  "currency": "USD"
+ },
+ {
+  "date": "2025-05-08",
+  "declarationDate": "2025-04-24",
+  "recordDate": "2025-05-09",
+  "paymentDate": "2025-05-23",
+  "period": "Quarterly",
+  "value": 0.22,
+  "unadjustedValue": 0.44,
+  "currency": "USD"
+ },
+ {
+  "date": "2025-08-07",
+  "declarationDate": "2025-07-24",
+  "recordDate": "2025-08-08",
+  "paymentDate": "2025-08-22",
+  "period": "Quarterly",
+  "value": 0.23,
+  "unadjustedValue": 0.46,
+  "currency": "USD"
+ },
+ {
+  "date": "2025-11-06",
+  "declarationDate": "2025-10-23",
+  "recordDate": "2025-11-07",
+  "paymentDate": "2025-11-21",
+  "period": "Quarterly",
+  "value": 0.23,
+  "unadjustedValue": 0.46,
+  "currency": "USD"
+ },
+ {
+  "date": "2026-02-05",
+  "declarationDate": "2026-01-22",
+  "recordDate": "2026-02-06",
+  "paymentDate": "2026-02-20",
+  "period": "Quarterly",
+  "value": 0.24,
+  "unadjustedValue": 0.48,
+  "currency": "USD"
+ },
+ {
+  "date": "2026-05-07",
+  "declarationDate": "2026-04-23",
+  "recordDate": "2026-05-08",
+  "paymentDate": "2026-05-22",
+  "period": "Quarterly",
+  "value": 0.24,
+  "unadjustedValue": 0.48,
+  "currency": "USD"
+ },
+ {
+  "date": "2026-08-06",
+  "declarationDate": "2026-07-23",
+  "recordDate": "2026-08-07",
+  "paymentDate": "2026-08-21",
+  "period": "Quarterly",
+  "value": 0.25,
+  "unadjustedValue": 0.5,
+  "currency": "USD"
+ },
+ {
+  "date": "2026-11-05",
+  "declarationDate": "2026-10-22",
+  "recordDate": "2026-11-06",
+  "paymentDate": "2026-11-20",
+  "period": "Quarterly",
+  "value": 0.25,
+  "unadjustedValue": 0.5,
+  "currency": "USD"
+ }
+]

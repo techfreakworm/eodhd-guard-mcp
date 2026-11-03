@@ -1,0 +1,10 @@
+{"type": "Splits", "description": "Historical and upcoming splits (synthetic)", "from": "2026-11-03", "to": "2026-12-03",
+  "splits": [
+    {"code": "ACME.US", "split_date": "2026-11-20", "optionable": "Y", "old_shares": 1, "new_shares": 4},
+    {"code": "GLOBEX.LSE", "split_date": "2026-11-09", "optionable": "N", "old_shares": 10, "new_shares": 1},
+    {"code": "UMBRELLA.NSE", "split_date": "2026-12-01", "optionable": "N", "old_shares": 1, "new_shares": 2},
+    {"code": "HOOLI.US", "split_date": "2026-11-03", "optionable": "Y", "old_shares": 1, "new_shares": 3},
+    {"code": "TYRELL.LSE", "split_date": "2026-11-27", "optionable": "N", "old_shares": 1, "new_shares": 1.038},
+    {"code": "WONKA.US", "split_date": "2026-11-12", "optionable": "N", "old_shares": 1, "new_shares": 10}
+  ]
+}

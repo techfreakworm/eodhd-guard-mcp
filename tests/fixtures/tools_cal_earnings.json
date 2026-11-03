@@ -1,0 +1,20 @@
+{"type": "Earnings", "description": "Historical and upcoming earnings releases (synthetic)", "from": "2026-11-03", "to": "2026-11-17",
+  "earnings": [
+    {"code": "HOOLI.US", "report_date": "2026-11-04", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": "USD", "actual": 2.1, "estimate": 1.95, "difference": 0.15, "percent": 7.69},
+    {"code": "VANDELAY.US", "report_date": "2026-11-12", "date": "2026-09-30", "before_after_market": null, "currency": null, "actual": null, "estimate": 0.4, "difference": 0, "percent": null},
+    {"code": "ACME.US", "report_date": "2026-11-10", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": "USD", "actual": null, "estimate": 1.18, "difference": 0, "percent": null},
+    {"code": "PIEDPIPER.US", "report_date": "2026-11-04", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": null, "actual": 0.52, "estimate": null, "difference": 0, "percent": null},
+    {"code": "GLOBEX.LSE", "report_date": "2026-11-12", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": null, "actual": null, "estimate": 0.31, "difference": 0, "percent": null},
+    {"code": "INITRODE.US", "report_date": "2026-11-05", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": "USD", "actual": 1.0, "estimate": 1.0, "difference": 0, "percent": null},
+    {"code": "UMBRELLA.NSE", "report_date": "2026-11-06", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": "INR", "actual": 14.2, "estimate": 13.9, "difference": 0.3, "percent": 2.16},
+    {"code": "7203.TSE", "report_date": "2026-11-05", "date": "2026-09-30", "before_after_market": null, "currency": null, "actual": null, "estimate": null, "difference": 0, "percent": null},
+    {"code": "INITECH.SW", "report_date": "2026-11-05", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": null, "actual": null, "estimate": 2.4, "difference": 0, "percent": null},
+    {"code": "TYRELL.LSE", "report_date": "2026-11-13", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": null, "actual": null, "estimate": 0.77, "difference": 0, "percent": null},
+    {"code": "1234.TSE", "report_date": "2026-11-13", "date": "2026-09-30", "before_after_market": null, "currency": null, "actual": null, "estimate": null, "difference": 0, "percent": null},
+    {"code": "WAYNE.US", "report_date": "2026-11-09", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": null, "actual": null, "estimate": 3.3, "difference": 0, "percent": null},
+    {"code": "STARK.US", "report_date": "2026-11-09", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": null, "actual": null, "estimate": 0.88, "difference": 0, "percent": null},
+    {"code": "WONKA.US", "report_date": "2026-11-16", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": null, "actual": null, "estimate": 0.12, "difference": 0, "percent": null},
+    {"code": "CYBERDYNE.US", "report_date": "2026-11-17", "date": "2026-09-30", "before_after_market": "BeforeMarket", "currency": null, "actual": null, "estimate": 0.05, "difference": 0, "percent": null},
+    {"code": "OSCORP.US", "report_date": "2026-11-11", "date": "2026-09-30", "before_after_market": "AfterMarket", "currency": null, "actual": null, "estimate": 1.5, "difference": 0, "percent": null}
+  ]
+}

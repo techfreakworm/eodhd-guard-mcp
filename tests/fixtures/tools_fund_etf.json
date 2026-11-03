@@ -1,0 +1,571 @@
+{
+ "General": {
+  "Code": "ACMX",
+  "Type": "ETF",
+  "Name": "Acme Broad Market ETF",
+  "Exchange": "NYSE ARCA",
+  "CurrencyCode": "USD",
+  "CurrencyName": "US Dollar",
+  "CurrencySymbol": "$",
+  "CountryName": "Exampleland",
+  "Category": "Large Blend",
+  "Description": "An invented index fund used in tests. It holds a basket of fictional large companies.",
+  "UpdatedAt": "2026-11-01"
+ },
+ "Technicals": {
+  "Beta": 1.0,
+  "52WeekHigh": 120.5,
+  "52WeekLow": 91.3,
+  "50DayMA": 110.1,
+  "200DayMA": 105.4
+ },
+ "ETF_Data": {
+  "ISIN": "XX0000000002",
+  "Company_Name": "Acme Fund Managers",
+  "Domicile": "XX",
+  "Index_Name": "Acme 60 Index",
+  "Yield": "1.31",
+  "Dividend_Paying_Frequency": "Quarterly",
+  "Inception_Date": "2005-03-14",
+  "Ongoing_Charge": "0.09",
+  "Total_Assets": "41200000000",
+  "Asset_Allocation": {
+   "Stock US": {
+    "Long_%": "97.9",
+    "Short_%": "0.0"
+   },
+   "Cash": {
+    "Long_%": "2.1",
+    "Short_%": "0.0"
+   }
+  },
+  "World_Regions": {
+   "North America": {
+    "Equity_%": "99.2",
+    "Relative_to_Category": "1.1"
+   },
+   "Europe": {
+    "Equity_%": "0.8",
+    "Relative_to_Category": "0.2"
+   }
+  },
+  "Sector_Weights": {
+   "Technology": {
+    "Equity_%": "28.4",
+    "Relative_to_Category": "1.0"
+   },
+   "Industrials": {
+    "Equity_%": "11.2",
+    "Relative_to_Category": "0.9"
+   }
+  },
+  "Top_10_Holdings": {
+   "HLD00.US": {
+    "Code": "HLD00",
+    "Exchange": "US",
+    "Name": "Holding 00 Inc",
+    "Sector": "Technology",
+    "Assets_%": 7.5
+   },
+   "HLD01.US": {
+    "Code": "HLD01",
+    "Exchange": "US",
+    "Name": "Holding 01 Inc",
+    "Sector": "Technology",
+    "Assets_%": 7.0
+   },
+   "HLD02.US": {
+    "Code": "HLD02",
+    "Exchange": "US",
+    "Name": "Holding 02 Inc",
+    "Sector": "Technology",
+    "Assets_%": 6.5
+   },
+   "HLD03.US": {
+    "Code": "HLD03",
+    "Exchange": "US",
+    "Name": "Holding 03 Inc",
+    "Sector": "Technology",
+    "Assets_%": 6.0
+   },
+   "HLD04.US": {
+    "Code": "HLD04",
+    "Exchange": "US",
+    "Name": "Holding 04 Inc",
+    "Sector": "Technology",
+    "Assets_%": 5.5
+   },
+   "HLD05.US": {
+    "Code": "HLD05",
+    "Exchange": "US",
+    "Name": "Holding 05 Inc",
+    "Sector": "Technology",
+    "Assets_%": 5.0
+   },
+   "HLD06.US": {
+    "Code": "HLD06",
+    "Exchange": "US",
+    "Name": "Holding 06 Inc",
+    "Sector": "Technology",
+    "Assets_%": 4.5
+   },
+   "HLD07.US": {
+    "Code": "HLD07",
+    "Exchange": "US",
+    "Name": "Holding 07 Inc",
+    "Sector": "Technology",
+    "Assets_%": 4.0
+   },
+   "HLD08.US": {
+    "Code": "HLD08",
+    "Exchange": "US",
+    "Name": "Holding 08 Inc",
+    "Sector": "Technology",
+    "Assets_%": 3.5
+   },
+   "HLD09.US": {
+    "Code": "HLD09",
+    "Exchange": "US",
+    "Name": "Holding 09 Inc",
+    "Sector": "Technology",
+    "Assets_%": 3.0
+   }
+  },
+  "Holdings": {
+   "HLD00.US": {
+    "Code": "HLD00",
+    "Exchange": "US",
+    "Name": "Holding 00 Inc",
+    "Sector": "Technology",
+    "Assets_%": 7.5
+   },
+   "HLD01.US": {
+    "Code": "HLD01",
+    "Exchange": "US",
+    "Name": "Holding 01 Inc",
+    "Sector": "Technology",
+    "Assets_%": 7.0
+   },
+   "HLD02.US": {
+    "Code": "HLD02",
+    "Exchange": "US",
+    "Name": "Holding 02 Inc",
+    "Sector": "Technology",
+    "Assets_%": 6.5
+   },
+   "HLD03.US": {
+    "Code": "HLD03",
+    "Exchange": "US",
+    "Name": "Holding 03 Inc",
+    "Sector": "Technology",
+    "Assets_%": 6.0
+   },
+   "HLD04.US": {
+    "Code": "HLD04",
+    "Exchange": "US",
+    "Name": "Holding 04 Inc",
+    "Sector": "Technology",
+    "Assets_%": 5.5
+   },
+   "HLD05.US": {
+    "Code": "HLD05",
+    "Exchange": "US",
+    "Name": "Holding 05 Inc",
+    "Sector": "Technology",
+    "Assets_%": 5.0
+   },
+   "HLD06.US": {
+    "Code": "HLD06",
+    "Exchange": "US",
+    "Name": "Holding 06 Inc",
+    "Sector": "Technology",
+    "Assets_%": 4.5
+   },
+   "HLD07.US": {
+    "Code": "HLD07",
+    "Exchange": "US",
+    "Name": "Holding 07 Inc",
+    "Sector": "Technology",
+    "Assets_%": 4.0
+   },
+   "HLD08.US": {
+    "Code": "HLD08",
+    "Exchange": "US",
+    "Name": "Holding 08 Inc",
+    "Sector": "Technology",
+    "Assets_%": 3.5
+   },
+   "HLD09.US": {
+    "Code": "HLD09",
+    "Exchange": "US",
+    "Name": "Holding 09 Inc",
+    "Sector": "Technology",
+    "Assets_%": 3.0
+   },
+   "HLD10.US": {
+    "Code": "HLD10",
+    "Exchange": "US",
+    "Name": "Holding 10 Inc",
+    "Sector": "Technology",
+    "Assets_%": 2.5
+   },
+   "HLD11.US": {
+    "Code": "HLD11",
+    "Exchange": "US",
+    "Name": "Holding 11 Inc",
+    "Sector": "Technology",
+    "Assets_%": 2.0
+   },
+   "HLD12.US": {
+    "Code": "HLD12",
+    "Exchange": "US",
+    "Name": "Holding 12 Inc",
+    "Sector": "Technology",
+    "Assets_%": 1.5
+   },
+   "HLD13.US": {
+    "Code": "HLD13",
+    "Exchange": "US",
+    "Name": "Holding 13 Inc",
+    "Sector": "Technology",
+    "Assets_%": 1.0
+   },
+   "HLD14.US": {
+    "Code": "HLD14",
+    "Exchange": "US",
+    "Name": "Holding 14 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.5
+   },
+   "HLD15.US": {
+    "Code": "HLD15",
+    "Exchange": "US",
+    "Name": "Holding 15 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD16.US": {
+    "Code": "HLD16",
+    "Exchange": "US",
+    "Name": "Holding 16 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD17.US": {
+    "Code": "HLD17",
+    "Exchange": "US",
+    "Name": "Holding 17 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD18.US": {
+    "Code": "HLD18",
+    "Exchange": "US",
+    "Name": "Holding 18 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD19.US": {
+    "Code": "HLD19",
+    "Exchange": "US",
+    "Name": "Holding 19 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD20.US": {
+    "Code": "HLD20",
+    "Exchange": "US",
+    "Name": "Holding 20 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD21.US": {
+    "Code": "HLD21",
+    "Exchange": "US",
+    "Name": "Holding 21 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD22.US": {
+    "Code": "HLD22",
+    "Exchange": "US",
+    "Name": "Holding 22 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD23.US": {
+    "Code": "HLD23",
+    "Exchange": "US",
+    "Name": "Holding 23 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD24.US": {
+    "Code": "HLD24",
+    "Exchange": "US",
+    "Name": "Holding 24 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD25.US": {
+    "Code": "HLD25",
+    "Exchange": "US",
+    "Name": "Holding 25 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD26.US": {
+    "Code": "HLD26",
+    "Exchange": "US",
+    "Name": "Holding 26 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD27.US": {
+    "Code": "HLD27",
+    "Exchange": "US",
+    "Name": "Holding 27 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD28.US": {
+    "Code": "HLD28",
+    "Exchange": "US",
+    "Name": "Holding 28 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD29.US": {
+    "Code": "HLD29",
+    "Exchange": "US",
+    "Name": "Holding 29 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD30.US": {
+    "Code": "HLD30",
+    "Exchange": "US",
+    "Name": "Holding 30 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD31.US": {
+    "Code": "HLD31",
+    "Exchange": "US",
+    "Name": "Holding 31 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD32.US": {
+    "Code": "HLD32",
+    "Exchange": "US",
+    "Name": "Holding 32 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD33.US": {
+    "Code": "HLD33",
+    "Exchange": "US",
+    "Name": "Holding 33 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD34.US": {
+    "Code": "HLD34",
+    "Exchange": "US",
+    "Name": "Holding 34 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD35.US": {
+    "Code": "HLD35",
+    "Exchange": "US",
+    "Name": "Holding 35 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD36.US": {
+    "Code": "HLD36",
+    "Exchange": "US",
+    "Name": "Holding 36 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD37.US": {
+    "Code": "HLD37",
+    "Exchange": "US",
+    "Name": "Holding 37 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD38.US": {
+    "Code": "HLD38",
+    "Exchange": "US",
+    "Name": "Holding 38 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD39.US": {
+    "Code": "HLD39",
+    "Exchange": "US",
+    "Name": "Holding 39 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD40.US": {
+    "Code": "HLD40",
+    "Exchange": "US",
+    "Name": "Holding 40 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD41.US": {
+    "Code": "HLD41",
+    "Exchange": "US",
+    "Name": "Holding 41 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD42.US": {
+    "Code": "HLD42",
+    "Exchange": "US",
+    "Name": "Holding 42 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD43.US": {
+    "Code": "HLD43",
+    "Exchange": "US",
+    "Name": "Holding 43 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD44.US": {
+    "Code": "HLD44",
+    "Exchange": "US",
+    "Name": "Holding 44 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD45.US": {
+    "Code": "HLD45",
+    "Exchange": "US",
+    "Name": "Holding 45 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD46.US": {
+    "Code": "HLD46",
+    "Exchange": "US",
+    "Name": "Holding 46 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD47.US": {
+    "Code": "HLD47",
+    "Exchange": "US",
+    "Name": "Holding 47 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD48.US": {
+    "Code": "HLD48",
+    "Exchange": "US",
+    "Name": "Holding 48 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD49.US": {
+    "Code": "HLD49",
+    "Exchange": "US",
+    "Name": "Holding 49 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD50.US": {
+    "Code": "HLD50",
+    "Exchange": "US",
+    "Name": "Holding 50 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD51.US": {
+    "Code": "HLD51",
+    "Exchange": "US",
+    "Name": "Holding 51 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD52.US": {
+    "Code": "HLD52",
+    "Exchange": "US",
+    "Name": "Holding 52 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD53.US": {
+    "Code": "HLD53",
+    "Exchange": "US",
+    "Name": "Holding 53 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD54.US": {
+    "Code": "HLD54",
+    "Exchange": "US",
+    "Name": "Holding 54 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD55.US": {
+    "Code": "HLD55",
+    "Exchange": "US",
+    "Name": "Holding 55 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD56.US": {
+    "Code": "HLD56",
+    "Exchange": "US",
+    "Name": "Holding 56 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD57.US": {
+    "Code": "HLD57",
+    "Exchange": "US",
+    "Name": "Holding 57 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD58.US": {
+    "Code": "HLD58",
+    "Exchange": "US",
+    "Name": "Holding 58 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   },
+   "HLD59.US": {
+    "Code": "HLD59",
+    "Exchange": "US",
+    "Name": "Holding 59 Inc",
+    "Sector": "Technology",
+    "Assets_%": 0.1
+   }
+  },
+  "Valuations_Growth": {
+   "Valuations_Rates_Portfolio": {
+    "Price/Prospective Earnings": "21.4"
+   }
+  },
+  "MorningStar": {
+   "Ratio": 4,
+   "Category_Benchmark": "Acme Large Blend Index"
+  },
+  "Performance": {
+   "Returns_YTD": "11.2",
+   "Returns_1Y": "14.8",
+   "Returns_3Y": "9.9"
+  }
+ }
+}

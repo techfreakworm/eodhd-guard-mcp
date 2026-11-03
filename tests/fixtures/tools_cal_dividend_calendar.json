@@ -1,0 +1,26 @@
+{
+ "meta": {
+  "total": 3,
+  "offset": 0,
+  "limit": 200,
+  "symbol": null,
+  "date_eq": "2026-11-05"
+ },
+ "data": [
+  {
+   "date": "2026-11-05",
+   "symbol": "ACME.US"
+  },
+  {
+   "date": "2026-11-05",
+   "symbol": "HOOLI.US"
+  },
+  {
+   "date": "2026-11-05",
+   "symbol": "GLOBEX.LSE"
+  }
+ ],
+ "links": {
+  "next": null
+ }
+}

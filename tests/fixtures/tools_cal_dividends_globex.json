@@ -1,0 +1,32 @@
+[
+ {
+  "date": "2025-08-14",
+  "declarationDate": "2025-07-31",
+  "recordDate": "2025-08-15",
+  "paymentDate": "2025-09-12",
+  "period": "Interim",
+  "value": 0.1,
+  "unadjustedValue": 0.1,
+  "currency": "GBP"
+ },
+ {
+  "date": "2026-03-26",
+  "declarationDate": "2026-03-12",
+  "recordDate": "2026-03-27",
+  "paymentDate": "2026-05-20",
+  "period": "Final",
+  "value": 0.2,
+  "unadjustedValue": 0.2,
+  "currency": "GBP"
+ },
+ {
+  "date": "2026-08-13",
+  "declarationDate": "2026-07-30",
+  "recordDate": "2026-08-14",
+  "paymentDate": "2026-09-11",
+  "period": "Interim",
+  "value": 0.11,
+  "unadjustedValue": 0.11,
+  "currency": "GBP"
+ }
+]
