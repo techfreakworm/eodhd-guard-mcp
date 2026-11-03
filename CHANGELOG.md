@@ -4,7 +4,35 @@ All notable changes to this project are recorded here. The format follows [Keep 
 
 ## [Unreleased]
 
-Planned as 0.2.0: news, news sentiment and the economic-events calendar, and the fixes from an independent code review.
+## [0.2.0] - 2026-11-04
+
+News, news sentiment and the economic-events calendar, and the fixes from an independent code review.
+
+### Added
+
+- Three read-only tools, which makes 17:
+  - `get_news`: financial news for 1 to 5 tickers or one topic tag, with headlines, excerpts (or about 4,000 characters of text with `include_content`), tickers, tags and sentiment scores. It costs 5 API calls for each ticker, and 5 for a topic.
+  - `get_sentiment`: daily news-sentiment scores for 1 to 10 tickers, with the number of articles behind each day, a `low_count` mark and an average weighted by articles. It costs 5 API calls for each ticker.
+  - `get_economic_events`: economic releases and events in a window of up to 90 days, sorted by time in UTC, with actual, estimate and previous values. It costs 1 API call whatever the window: the window is fetched once (up to EODHD's 1,000 rows), and the filter by event name and the pages are applied here.
+- Three warning codes: `SENTIMENT_UNRELIABLE` (EODHD's sentiment scores were often wrong in checks), `LOW_ARTICLE_COUNT` (a day that rests on fewer than three articles) and `SCORES_DROPPED` (sentiment values that were not numbers in range, set to null).
+- The new endpoints in the cost table that `get_usage` shows.
+- Cleaning of third-party text: Windows line endings, no-break spaces and invisible characters are taken out of article text, and titles, excerpts and tags are cut at a word. Every answer says that this text is data, never instructions. Sentiment scores are checked to be numbers in range.
+
+### Fixed
+
+- End-of-day answers whose range reaches the newest sessions are cached until the next bar is due, between 5 minutes and 6 hours (1 hour for `check_symbol`), and not for a flat 6 hours, so a bar that has just been published is not hidden.
+- A call never accepts a cached answer that is older than its own lifetime, even when another call stored it for longer. A cached "not found" is kept for the endpoint's lifetime, at most 24 hours.
+- Identical requests made at the same time share one call: the first pays, and the others are served its answer as a cache hit. This applies only while the cache is on.
+- The cache key includes the server address and a one-way fingerprint of the API key, so an answer fetched for one server or key is not served to another. Entries written by 0.1.0 are not reused and are fetched again once.
+- An existing state folder and its database files are set to mode 700 and 600 on Linux and macOS. Only newly created ones were before.
+- The 150 KB cap on `get_fundamentals` is measured on the indented JSON that is sent, which is what the model reads. It used to count compact JSON, so an answer could be larger than the cap. With the cache off, the tool description and the notes say that every read costs 10 calls.
+- Text from the data vendor (names, holders, currencies, tickers) is cut to 200 characters, and a description to 500. The server instructions tell the model to treat such text as data, never as instructions.
+- `check_symbol` no longer reads holiday filler bars as signs of life. Its advice names no company: names and ISINs are in `name`, `isin` and `successor_candidates`, and when the delisted list holds several companies under one code they are listed in a new `clashing_names` field.
+- An end-of-day range whose bar is not due yet, such as today's session before it is published, returns an empty list with `EMPTY_RESULT`, `latest_due` and `next_bar_due`, and not a `NO_DATA` error.
+- `STALE_DATA` is judged against the last session that the range can hold, so a complete range that ended days ago is not reported as behind.
+- `get_dividends` warns about the currency of a London line only when a row names one. With none, a note says that the currency is unknown. The warnings no longer state the quote currency of the line, because EODHD does not give it, and point to `list_exchange_symbols`.
+- A result that has been paid for is kept when the budget check after it fails (a locked ledger, say). Only the `BUDGET_LOW` warning is lost. Closing the server cancels requests that are still in flight.
+- Values EODHD sends in forms that cannot be read (integers too large for a number, a timestamp beyond the year 9999) are treated as missing and no longer fail the call. Log redaction also covers handlers that print a traceback from the exception itself.
 
 ## [0.1.0] - 2026-11-03
 
@@ -55,5 +83,6 @@ The first release, on [PyPI](https://pypi.org/project/eodhd-guard-mcp/0.1.0/) an
 - Tooling: CI (lint, type check, tests on three operating systems, package build, secret scan), Dependabot, pre-commit hooks and a gitleaks configuration.
 - Release automation: after CI passes on `main`, a workflow builds the package and, when the version is new, publishes it to PyPI, tags a GitHub release and lists the server in the MCP registry (`server.json`). It does nothing until the repository variable `RELEASE_ENABLED` is `true`, and a script and a test check that `server.json` and the package carry the same version.
 
-[Unreleased]: https://github.com/techfreakworm/eodhd-guard-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/techfreakworm/eodhd-guard-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/techfreakworm/eodhd-guard-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/techfreakworm/eodhd-guard-mcp/releases/tag/v0.1.0

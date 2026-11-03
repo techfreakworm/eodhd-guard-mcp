@@ -66,6 +66,8 @@ Ask in plain language:
 - "Use eodhd-guard to check ROG.SW and tell me if the code is still active."
 - "Get the last month of daily prices for VOD.LSE, and say which price basis you used."
 - "How much of my EODHD budget have I used today?"
+- "What US economic releases are scheduled for the next week?" (1 API call)
+- "Get the last week of news for AAPL.US, and tell me how far to trust the sentiment scores." (5 API calls for each ticker)
 
 Every answer carries its cost in `meta.cost`, and any warnings come back next to the data. If the assistant leaves a warning out of its summary, ask it to list them.
 
@@ -80,7 +82,7 @@ claude mcp add eodhd-guard --scope user \
   -- eodhd-guard-mcp
 ```
 
-The free EODHD plan allows 20 calls a day. The first fundamentals request for a symbol costs 10 and an intraday request costs 5, so a low budget goes quickly. Ask for `get_usage` to see the spend; it costs nothing, and it still works when the budget is used up.
+The free EODHD plan allows 20 calls a day. The first fundamentals request for a symbol costs 10, and an intraday request and a news request for one ticker cost 5 each, so a low budget goes quickly. Ask for `get_usage` to see the spend; it costs nothing, and it still works when the budget is used up.
 
 To change a setting later, remove the server and add it again:
 

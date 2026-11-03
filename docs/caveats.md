@@ -15,7 +15,7 @@ The server cannot make EODHD's data better. It makes sure the model, and you, kn
 | [Coverage gaps](#coverage-gaps) | `NOT_COVERED`, `PARTIAL_COVERAGE` | the price, quote, fundamentals, dividend and split tools; `check_symbol`; the earnings and split calendars; `list_exchanges`, `list_exchange_symbols` and `search_symbols` |
 | [Frozen or renamed codes](#frozen-or-renamed-codes) | `STALE_DATA`, `NO_DATA`, `POSSIBLY_INACTIVE` | `get_eod_prices`, `check_symbol`, `search_symbols` |
 | [NA quotes](#na-quotes) | `NO_QUOTE`, `STALE_QUOTE`, `NO_DATA` | `get_quote`, `check_symbol` |
-| [Ignored parameters](#ignored-parameters) | `INVALID_PARAMS`, `RANGE_CLAMPED`, `RANGE_TRIMMED` | all; `RANGE_CLAMPED` only for the price tools |
+| [Ignored parameters](#ignored-parameters) | `INVALID_PARAMS`, `RANGE_CLAMPED`, `RANGE_TRIMMED` | all; `RANGE_CLAMPED` only for the price, news and sentiment tools |
 | [Raw and adjusted prices](#raw-and-adjusted-prices) | `SPINOFF_ADJUSTED_CLOSE`, `ODD_SPLIT_RATIO` | `get_eod_prices`, `get_splits` |
 | [Two meanings of NSE close](#two-meanings-of-nse-close) | none | `get_eod_prices` |
 | [Holiday filler bars](#holiday-filler-bars) | `FILLER_BARS_REMOVED` | `get_eod_prices` |
@@ -23,6 +23,8 @@ The server cannot make EODHD's data better. It makes sure the model, and you, kn
 | [Same-day intraday bars and delayed quotes](#same-day-intraday-bars-and-delayed-quotes) | `INTRADAY_NOT_SAME_DAY`, `NO_INTRADAY_DATA`, `DELAYED_QUOTE` | `get_intraday_prices`, `get_quote` |
 | [Fundamentals](#fundamentals) | `FILING_DATE_UNRELIABLE`, `DIVIDEND_YIELD_INCONSISTENT`, `EPS_BASIS`, `CURRENCY_MISMATCH`, `CURRENCY_NOTE`, `TRUNCATED` | `get_fundamentals`, `get_dividends`, `get_eod_prices`, `get_quote` |
 | [Calendars](#calendars) | `CALENDAR_TIMING_UNRELIABLE`, `NO_CALENDAR_ROWS`, `PARTIAL_COVERAGE`, `NOT_COVERED`, `RANGE_TRIMMED`, `TRUNCATED` | `get_earnings_calendar`, `get_dividend_calendar`, `get_split_calendar`, `get_dividends`, `get_splits` |
+| [News, sentiment and economic events](#news-sentiment-and-economic-events) | `SENTIMENT_UNRELIABLE`, `LOW_ARTICLE_COUNT`, `SCORES_DROPPED`, `PARTIAL_COVERAGE`, `TRUNCATED` | `get_news`, `get_sentiment`, `get_economic_events` |
+| [Text from the vendor](#text-from-the-vendor) | none (the text is cut to length) | all |
 | [Delisted names and search](#delisted-names-and-search) | `POSSIBLY_INACTIVE`, `EMPTY_RESULT`, `TRUNCATED` | `search_symbols`, `list_exchange_symbols`, `check_symbol` |
 | [Holiday lists](#holiday-lists) | none | `get_eod_prices`, `check_symbol` |
 
@@ -52,12 +54,13 @@ Search does not give the dead code away either. EODHD's search does not return a
 
 **What the server does.**
 
-- `get_eod_prices` compares the last bar with the latest session the market should have published by now. When the gap is `EODHD_GUARD_STALE_SESSIONS` sessions or more (default 3), it adds `STALE_DATA`, names both dates and points to `check_symbol`. The check looks at the newest bar that is not a filler bar. It runs on daily bars when `end` is within 7 days of today, so a deliberately historical query is not flagged.
+- `get_eod_prices` compares the last bar with the latest session the market should have published by now, or with the range's own last session when the range stops earlier, so a complete range that ended days ago is not reported as behind. When the gap is `EODHD_GUARD_STALE_SESSIONS` sessions or more (default 3), it adds `STALE_DATA`, names both dates and points to `check_symbol`. The check looks at the newest bar that is not a filler bar. It runs on daily bars when `end` is within 7 days of today, so a deliberately historical query is not flagged.
 - An empty answer for a range that contains session days is `NO_DATA`, never a quiet empty success.
-- `check_symbol` fetches the last 14 days of bars (cached for an hour). When the status is not ok, it looks for the line's name and then for successors, in up to three steps. First a search by code, limited to the exchange. If search no longer returns the line, the exchange's delisted list, which is how a renamed line such as `ROG.SW` is found. Then a search by the company name on the same exchange.
+- `check_symbol` fetches the last 14 days of bars (cached until the next bar is due, at most an hour) and sets holiday filler bars aside. When the status is not ok, it looks for the line's name and then for successors, in up to three steps. First a search by code, limited to the exchange. If search no longer returns the line, the exchange's delisted list, which is how a renamed line such as `ROG.SW` is found. Then a search by the company name on the same exchange.
 - The name only ever comes from a row with the very same code on the very same exchange. A row of that code on another exchange can be a different company, so it is never used.
 - The candidates are other codes on the same exchange that have a recent previous close, at most five, with those whose ISIN starts with the same country letters first. Their ISINs are included so you can confirm it is the same company.
 - A step that fails does not lose the verdict. If the quote or the successor search fails, the status stays as found and `advice` says what went wrong.
+- `advice` names no company, because what EODHD calls one is text of its own. Names and ISINs are in `name`, `isin` and `successor_candidates`. When the delisted list holds several companies under one code, `clashing_names` lists them and no successor search is made.
 - `search_symbols` marks lines whose previous close is old or missing (`possibly_inactive`, `POSSIBLY_INACTIVE`).
 - `get_quote` flags the same condition with `NO_QUOTE` or `STALE_QUOTE` (see below).
 
@@ -92,8 +95,8 @@ None of these produces an error, so a typo changes the meaning of a request with
 - Choices such as `period`, `interval`, `price_basis` and `type` must be one of the listed values.
 - A symbol must be `CODE.EXCHANGE`. A bare code fails with an explanation that EODHD would have used the US exchange, and examples: `AAPL.US`, `VOD.LSE`, `NESN.SW`, `RELIANCE.NSE`.
 - A start after the end, or a span beyond the tool's limit, is rejected. So is a price `start` in the future.
-- The price tools clamp an `end` in the future to today, or for intraday to now rounded up to the next quarter hour, and say so with `RANGE_CLAMPED`. The calendars look forward, so they never clamp. They refuse a window of more than 90 days instead.
-- Rows that EODHD returns outside the requested range are dropped (`RANGE_TRIMMED`). That covers prices, intraday bars, dividends and the calendars.
+- The price, news and sentiment tools clamp an `end` in the future to today, or for intraday to now rounded up to the next quarter hour, and say so with `RANGE_CLAMPED`. The calendars and the economic events look forward, so they never clamp. They refuse a window of more than 90 days instead.
+- Rows that EODHD returns outside the requested range are dropped (`RANGE_TRIMMED`). That covers prices, intraday bars, dividends, the calendars, news, sentiment and the economic events.
 
 The server validates only the parameters of the endpoints it wraps.
 
@@ -141,7 +144,7 @@ The list of known events is short and fixed in the code. A spin-off that is not 
 
 - `get_eod_prices` drops these bars by default and adds `FILLER_BARS_REMOVED`.
 - `include_filler_bars=true` keeps them.
-- The staleness check ignores filler bars: a filler bar is not evidence that the line traded. If every bar in a range is filler, the warning says so and suggests `check_symbol`.
+- The staleness check ignores filler bars: a filler bar is not evidence that the line traded. If every bar in a range is filler, the warning says so and suggests `check_symbol`. `check_symbol` sets them aside as well: they never make a line look alive, and its advice says how many it saw after the last real bar.
 - The rule is exactly "volume is zero and open, high, low and close are equal". It cannot tell a holiday from a genuine day without a trade in a very thinly traded security. If you need every row, set `include_filler_bars=true`.
 
 ## Publication lag
@@ -161,7 +164,8 @@ Other markets were not measured.
 
 - To decide when a bar should exist, the server uses an allowance per market: US 30 minutes, London 2 hours, Switzerland 4 hours and NSE 5 hours. Each is at or a little above the observed range, so asking soon after the close does not look like missing data. Other markets use rough estimates that the code marks as unmeasured, and an unknown exchange gets 6 hours.
 - `STALE_DATA` needs `EODHD_GUARD_STALE_SESSIONS` sessions of lag (default 3), so ordinary publication lag never triggers it.
-- A missing bar for today is normal and produces no warning.
+- A missing bar for today is normal and produces no warning. A range whose sessions have no bar due yet, such as today's before it is published, is an empty result with `EMPTY_RESULT`, not `NO_DATA`. Its details give `latest_due`, the latest session whose bar is expected by now, and `next_bar_due`, the time from which the next one is.
+- End-of-day answers that reach the newest sessions are cached until the next bar is due (at least 5 minutes, at most 6 hours), so a bar that has just been published is not hidden for hours.
 
 ## Same-day intraday bars and delayed quotes
 
@@ -192,15 +196,16 @@ Other markets were not measured.
 
 **What the server does.**
 
-- The first `get_fundamentals` call for a symbol costs 10. The server caches the whole document for 24 hours, so reading further sections or statements for that symbol costs nothing in that time.
-- It trims the output: it drops officer lists, addresses and logos, cuts long descriptions, limits holders and insider transactions, and keeps the newest `periods` of each statement. The result is capped at about 150 KB, and `TRUNCATED` says when something was cut.
+- The first `get_fundamentals` call for a symbol costs 10. The server caches the whole document for 24 hours, so reading further sections or statements for that symbol costs nothing in that time. With the cache off, every read costs 10, and the tool description and the notes say so.
+- It trims the output: it drops officer lists, addresses and logos, cuts long descriptions, limits holders and insider transactions, and keeps the newest `periods` of each statement. Text from EODHD is cut to 200 characters. The result is capped at 150 KB of the indented JSON that is sent, which is what the model reads, and `TRUNCATED` says when something was cut.
 - A note gives the typical 1 to 4 day arrival lag, together with `General.UpdatedAt`. Another note appears when `Earnings.History` lists quarters that have not reported yet, because those count towards `periods`.
 - Statements are chosen with `statements`. Passing `Financials` as a section is refused with a hint, and a section or statement that EODHD's document does not hold is listed in `data.not_in_document` instead of being dropped without a word.
 - `FILING_DATE_UNRELIABLE` appears when `filing_date` equals the period end in any returned period.
 - `DIVIDEND_YIELD_INCONSISTENT` appears when the yield is 0 and a forward dividend rate is set.
 - `EPS_BASIS` appears whenever `Earnings` is returned.
-- `CURRENCY_MISMATCH` appears when a statement's currency differs from `General.CurrencyCode`. On a London line, `get_dividends` raises it when the dividends are in a currency other than GBX, which is often pounds and so a factor of 100 away from the price.
+- `CURRENCY_MISMATCH` appears when a statement's currency differs from `General.CurrencyCode`. On a London line, `get_dividends` raises it when a dividend names a currency other than GBX, which is often pounds and so a factor of 100 away from the price.
 - `get_eod_prices` and `get_quote` add `CURRENCY_NOTE` for London lines, which are usually quoted in GBX. `get_dividends` adds it when the dividends are in GBX too.
+- EODHD's dividend answer does not say what currency a line is quoted in, and a few London lines are quoted in dollars or euros. So the dividend sentences say what is usual, only count a currency that a row names, and point to `list_exchange_symbols` for the line's own currency. When no row names a currency there is no warning, and a note says the currency is unknown.
 
 ## Calendars
 
@@ -225,6 +230,39 @@ Other markets were not measured.
 - `get_dividend_calendar` returns the symbol and date, and its notes point to `get_dividends` for amounts.
 - `get_splits` takes the whole history, which is short, and filters by date here, so no date parameter reaches EODHD. `ODD_SPLIT_RATIO` flags the ratios that look like other corporate actions.
 - The calendars and `get_dividends` drop rows outside the window and say so (`RANGE_TRIMMED`). A 403 names the plans: "Fundamentals Data Feed" or "All-in-One" for the calendars, "EOD Historical Data" or higher for dividend and split history.
+
+## News, sentiment and economic events
+
+**What we saw.** These endpoints were checked in November 2026.
+
+- **Sentiment scores that are often wrong.** A story about steep declines scored strongly positive. Article polarity was above 0.9 in absolute value for most articles (34 of 40 in one sample).
+- **Daily scores can rest on one or two articles.** A day without articles is absent from the answer, not zero.
+- **Untidy article text.** Articles carry Windows line endings, no-break spaces, word joiners and other invisible characters, and a page footer.
+- **Tickers and tags in alphabetical order,** up to 50 for an article, so the first few say nothing about the story.
+- **Price.** A news or sentiment request costs 5 API calls for each ticker. The economic events cost 1 for any window.
+- **Event times are UTC.** Nonfarm Payrolls, at 08:30 in New York, appeared as 13:30 once the US clocks had gone back, which is right. CFTC positioning rows kept 19:30 across the change, so they came an hour early. A time of 00:00:00 means that no time is known.
+- **Zero before a release.** EODHD sends `change` and `change_percentage` as 0, not null, while an event has no actual, which reads as "unchanged".
+- **Newest first.** Event rows arrive newest first, and a small `limit` drops the oldest day of the window.
+- **Week on week.** The `comparison` of an event can be `wow` as well as `mom`, `qoq` and `yoy`, and the tool accepts all four.
+- **A cap.** One request returns at most 1,000 events.
+
+**What the server does.**
+
+- `get_news` takes either tickers (1 to 5) or one topic tag, and costs 5 for each ticker, or 5 for a topic. It cleans line endings, invisible characters and odd spaces, cuts titles, excerpts and tags at a word, counts articles with the same link once, and lists the tickers you asked for first. It does not remove a page footer. Every answer says that the text is third-party data, never instructions.
+- Every sentiment value is checked. One that is not a number in range is set to null and counted (`SCORES_DROPPED`). `SENTIMENT_UNRELIABLE` accompanies every score that is returned, and says that the scores were often wrong in checks.
+- `get_sentiment` marks a day with fewer than 3 articles (`low_count`, `LOW_ARTICLE_COUNT`), gives an average weighted by articles over every day in the window, and lists the most recent 90 days (`TRUNCATED` says when it cut).
+- `get_economic_events` asks for the whole window at once with the maximum of 1,000 rows, sorts the events by time, and filters by event name and pages them here, so only the first request is billed. It turns the 0 of `change` and `change_pct` into null unless both `actual` and `previous` exist. When EODHD returned its maximum, `TRUNCATED` says that events may be missing, and suggests a country or a shorter window.
+- No one has checked whether EODHD has news or sentiment for Tokyo or the UAE, where it has no prices. Those requests are sent, and billed, with `PARTIAL_COVERAGE`, and an empty answer says nothing about the market.
+
+## Text from the vendor
+
+**The risk.** Names, holders, descriptions, article titles and tags are free text written by the vendor or by third parties. The model reads these fields next to the numbers, so a long or hostile text would sit among them.
+
+**What the server does.**
+
+- It cuts such text to 200 characters, and a fundamentals description to 500. In news, a title is cut to 300 characters, a tag to 40 and an excerpt to about 400 (about 4,000 with `include_content`), all at a word.
+- It keeps names out of the sentences of its own warnings and advice, where they would read as the server's voice. They stay in the data fields.
+- Its instructions tell the model to treat names, descriptions and other text fields as data, never as instructions. Every news answer repeats that in a note.
 
 ## Delisted names and search
 
