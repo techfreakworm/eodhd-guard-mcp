@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.techfreakworm/eodhd-guard-mcp",
+  "title": "EODHD Guard",
+  "description": "EODHD market data that catches silent failures: frozen codes, NA quotes, empty answers.",
+  "repository": {
+    "url": "https://github.com/techfreakworm/eodhd-guard-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "eodhd-guard-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "EODHD_API_KEY",
+          "description": "Your EODHD API key. You need your own EODHD subscription.",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "EODHD_GUARD_DAILY_BUDGET",
+          "description": "Most EODHD API calls this server may spend per GMT day; 0 means no limit.",
+          "default": "1000"
+        }
+      ]
+    }
+  ]
+}

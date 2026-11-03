@@ -1,0 +1,188 @@
+name: Release
+
+# Runs after CI passes for a push to main. It releases only when the version in
+# src/eodhd_guard_mcp/__init__.py (and server.json) has no tag and no PyPI release yet:
+#   build -> PyPI (trusted publishing, no stored token) -> tag + GitHub release -> MCP registry.
+# A push that keeps the version releases nothing, so to release, bump the version.
+# Nothing is published until the repository variable RELEASE_ENABLED is "true".
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # The commit CI tested. Every job builds and tags exactly this one.
+  SHA: ${{ github.event.workflow_run.head_sha }}
+  PACKAGE: eodhd-guard-mcp
+  MCP_NAME: io.github.techfreakworm/eodhd-guard-mcp
+
+jobs:
+  plan:
+    name: Decide whether to release
+    # Only a green CI run for a push to this repository's own main. A pull request from a fork whose
+    # branch happens to be called main must never reach the publishing jobs.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Read the version and check whether it is new
+        id: plan
+        env:
+          ENABLED: ${{ vars.RELEASE_ENABLED }}
+        run: |
+          set -euo pipefail
+          version=$(python scripts/release_version.py)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          release=true
+          if [ "${ENABLED:-}" != "true" ]; then
+            echo "::notice::Releases are off. Set the repository variable RELEASE_ENABLED to true once PyPI trusted publishing is configured."
+            release=false
+          elif git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/v${version}" > /dev/null; then
+            echo "::notice::v${version} is already tagged. Bump the version to release."
+            release=false
+          elif curl -fsS -o /dev/null "https://pypi.org/pypi/${PACKAGE}/${version}/json"; then
+            echo "::notice::${PACKAGE} ${version} is already on PyPI. Bump the version to release."
+            release=false
+          else
+            echo "::notice::Releasing ${PACKAGE} ${version} from ${SHA}."
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build distribution
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Build and check
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Check the README carries the MCP registry name
+        run: |
+          grep -q "mcp-name: ${MCP_NAME}" README.md
+      - uses: actions/upload-artifact@v6
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  pypi:
+    name: Publish to PyPI
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The environment is limited to main. PyPI trusts this workflow file and this environment only.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/eodhd-guard-mcp/${{ needs.plan.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Tag and GitHub release
+    needs: [plan, pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: dist
+          path: dist/
+      - name: Create the tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          gh release create "v${VERSION}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${SHA}" \
+            --title "v${VERSION}" \
+            --generate-notes
+
+  mcp-registry:
+    name: Publish to the MCP registry
+    needs: [plan, pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.7
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SHA }}
+          persist-credentials: false
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+          arch="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          archive="mcp-publisher_${os}_${arch}.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+      # The registry checks the README on PyPI for the mcp-name line, so the release must be live first.
+      - name: Wait until PyPI serves the release
+        run: |
+          for attempt in $(seq 1 30); do
+            if curl -fsS -o /dev/null "https://pypi.org/pypi/${PACKAGE}/${VERSION}/json"; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::${PACKAGE} ${VERSION} did not appear on PyPI within 5 minutes."
+          exit 1
+      - name: Authenticate to the MCP registry
+        run: ./mcp-publisher login github-oidc
+      - name: Publish server.json
+        run: ./mcp-publisher publish
