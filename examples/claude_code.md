@@ -5,11 +5,11 @@ These steps register the server with [Claude Code](https://claude.com/claude-cod
 ## 1. Install
 
 ```bash
-pipx install git+https://github.com/techfreakworm/eodhd-guard-mcp
+pipx install eodhd-guard-mcp
 eodhd-guard-mcp --version
 ```
 
-The package is not on PyPI yet. `pip install git+https://github.com/techfreakworm/eodhd-guard-mcp` into a virtual environment works too. In that case, use the absolute path to the `eodhd-guard-mcp` script in step 3.
+`pip install eodhd-guard-mcp` into a virtual environment works too. In that case, use the absolute path to the `eodhd-guard-mcp` script in step 3.
 
 ## 2. Keep the key in a file
 
@@ -38,7 +38,7 @@ To skip the install step, let `uvx` fetch and run it:
 ```bash
 claude mcp add eodhd-guard --scope user \
   --env EODHD_API_KEY_FILE="$HOME/.config/eodhd-guard-mcp/api_key" \
-  -- uvx --from git+https://github.com/techfreakworm/eodhd-guard-mcp eodhd-guard-mcp
+  -- uvx eodhd-guard-mcp
 ```
 
 On Windows, use an absolute path for the key file, for example `C:\Users\you\eodhd-guard-mcp\api_key`.
@@ -51,7 +51,7 @@ claude mcp list
 
 `eodhd-guard` should show as connected. Inside a Claude Code session, `/mcp` shows the same status.
 
-You can also check the configuration without Claude Code. This prints whether a key is set (never the key), the state directory and the budget:
+You can also check the configuration without Claude Code. This prints, to stderr, whether a key is set (never the key), the state directory and the budget. The exit code is 0 when all is well, 1 when no key is set and 2 when a setting is invalid:
 
 ```bash
 EODHD_API_KEY_FILE="$HOME/.config/eodhd-guard-mcp/api_key" eodhd-guard-mcp --check
@@ -80,7 +80,7 @@ claude mcp add eodhd-guard --scope user \
   -- eodhd-guard-mcp
 ```
 
-The free EODHD plan allows 20 calls a day. A fundamentals request costs 10 and an intraday request costs 5, so a low budget goes quickly. Ask for `get_usage` to see the spend.
+The free EODHD plan allows 20 calls a day. The first fundamentals request for a symbol costs 10 and an intraday request costs 5, so a low budget goes quickly. Ask for `get_usage` to see the spend; it costs nothing, and it still works when the budget is used up.
 
 To change a setting later, remove the server and add it again:
 

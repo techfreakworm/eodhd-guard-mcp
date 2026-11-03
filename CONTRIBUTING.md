@@ -10,7 +10,7 @@ For a new tool or a large change, open an issue first so we can agree that it fi
 
 EODHD's licence is for personal use and forbids redistributing its data. A real response in a fixture, an issue, a pull request, a log or a doc counts as redistribution.
 
-- Fixtures live in `tests/fixtures/` as JSON. They use fictional companies (`ACME.US`, `GLOBEX.LSE`, `INITECH.SW`, `UMBRELLA.NSE`) and invented numbers.
+- Fixtures live in `tests/fixtures/` as JSON. They use fictional companies (`ACME.US`, `GLOBEX.LSE`, `INITECH.SW`, `UMBRELLA.NSE`) and invented numbers. A test that reproduces one documented real case, such as Roche's re-key from `ROG.SW` to `ROP.SW`, a Tokyo or UAE code, or a known spin-off, may use the real ticker and company name, with invented prices, ISINs and everything else.
 - Copy only the **shape** of real answers: field names, types and quirks such as `"NA"` strings, `[]` bodies, plain-text 404 bodies, filler bars and odd split ratios. Do not copy values.
 - A real number that has been nudged is still a real number. Invent new ones.
 - Real responses may be used only from a local, git-ignored folder, through the contract tests described below. That folder never leaves your machine.
@@ -44,7 +44,7 @@ CI runs the same checks. It runs the tests on Linux with Python 3.10 to 3.13, an
 
 ## Contract tests and live tests
 
-**Contract tests** (`tests/contract`, marker `contract`) run against a local folder of real responses. They are skipped unless `EODHD_GUARD_EVAL_CACHE` points at that folder.
+**Contract tests** (`tests/contract`, marker `contract`) run against a local folder of real responses. They are skipped unless `EODHD_GUARD_EVAL_CACHE` points at that folder. The folder holds one JSON file per answer, named `<endpoint>/<name>__<hash>.json`, each a wrapper `{"status": ..., "body": ...}` around the raw answer. The tests assert codes and shapes, never values.
 
 ```bash
 EODHD_GUARD_EVAL_CACHE=/path/to/your/local/folder pytest tests/contract
@@ -52,7 +52,7 @@ EODHD_GUARD_EVAL_CACHE=/path/to/your/local/folder pytest tests/contract
 
 The folder holds licensed data. Keep it outside the repository, or in `_local/`, which is git-ignored. Never commit it, share it or attach it to an issue.
 
-**Live tests** (`tests/live`, marker `live`) call the real API. They run only with `EODHD_GUARD_LIVE=1` and a key, and must stay under 10 calls per run. CI never runs them.
+**Live tests** (`tests/live`, marker `live`) call the real API. They run only with `EODHD_GUARD_LIVE=1` and a key, and must stay under 10 calls per run (the current ones make about six, with a budget of 25). CI never runs them.
 
 ```bash
 EODHD_GUARD_LIVE=1 EODHD_API_KEY_FILE="$HOME/.config/eodhd-guard-mcp/api_key" pytest tests/live
@@ -67,9 +67,9 @@ Follow [docs/DESIGN.md](docs/DESIGN.md). It is the contract between the modules,
 1. **Design first.** Add the tool to DESIGN.md: signature with defaults, cost, cache lifetime, guards in order, and output shape.
 2. **Price it.** Add the endpoint to the cost table in `costs.py`. If you took the price from EODHD's documentation and did not measure it, say so with `measured=False`.
 3. **Validate before calling.** Use `validation.py` (`parse_symbol`, `parse_date`, `resolve_range`, `check_int` and the rest). EODHD ignores bad parameters, so the tool must not. Every `INVALID_PARAMS` message names the field, the value received and what is accepted.
-4. **Write the tool** in the matching module under `src/eodhd_guard_mcp/tools/` and register it in `register_all`. Declare parameters as `Annotated[T, Field(description=...)]`, because the SDK does not read docstrings for parameter descriptions. The tool description states the cost in API calls and the main caveat, in two to four sentences. Tools are read-only and go through the `guarded` decorator.
-5. **Treat empty and placeholder answers as non-data.** HTTP 200 with `[]`, `"NA"` fields or the wrong shape becomes an error or an explicit warning, never a silent success. Return `build_response`, add any new warning code to `WarningCode` and to the table in DESIGN.md, and keep default outputs small.
-6. **Test every guard.** For each guard, write a test that fails when the guard is removed. Use the `MockEODHD` helper and synthetic fixtures. An unmocked path fails the test with an error that names it, so a test cannot reach the network by accident. Add an integration test through the in-process MCP client for registration and error mapping.
+4. **Write the tool** in the matching module under `src/eodhd_guard_mcp/tools/`, and register it in that module's `register(server, deps)`. A new module also goes into the list in `register_all`. Declare parameters as `Annotated[T, Field(description=...)]`, because the SDK does not read docstrings for parameter descriptions. The tool description is a module constant. It states the cost in API calls and the main caveat, in two to four sentences. Tools are read-only (use `READ_ONLY`) and go through the `guarded` decorator.
+5. **Treat empty and placeholder answers as non-data.** HTTP 200 with `[]`, `"NA"` fields or the wrong shape becomes an error or an explicit warning, never a silent success. Return `build_response`, add any new warning code to `WarningCode`, to the table in DESIGN.md and to the table in the README, and keep default outputs small.
+6. **Test every guard.** For each guard, write a test that fails when the guard is removed. Use the `MockEODHD` helper and synthetic fixtures. An unmocked path fails the test with an error that names it, so a test cannot reach the network by accident. Add a test through the in-process MCP client (the `mcp_client` fixture) for registration and error mapping. Those tests sit beside the module's other tests in `tests/tools/`.
 7. **Document it.** Update the README tool table and tool section, `docs/caveats.md` if the tool guards a new quirk of the data, and `CHANGELOG.md`.
 
 ## Update the coverage registry
@@ -81,7 +81,7 @@ To add a gap:
 1. Check it on your own account. Record the date, the endpoints you tried and the HTTP statuses. Put that evidence in the pull request as statuses and shapes, not data.
 2. Add a `CoverageGap` with its `key`, `market`, every exchange code and suffix that means the market (`suffixes`), whether the earnings calendar still has rows (`calendar_dates`), a `message` that says what is missing and when it was checked ("in checks in October 2026"), and `alternatives`.
 3. Be careful with look-alike suffixes. `T` is Tokyo, but `TO` is Toronto and `TA` is Tel Aviv.
-4. Add tests for `find_gap` and `ensure_covered`, and update the registry list in DESIGN.md and the section in `docs/caveats.md`.
+4. Add tests for `find_gap`, `ensure_covered` and `ensure_exchange_covered`, and update the registry list in DESIGN.md and the section in `docs/caveats.md`.
 
 To remove a gap, repeat the check when EODHD announces coverage, delete the entry, and say so in the changelog. Users can switch the pre-check off in the meantime with `EODHD_GUARD_ALLOW_UNCOVERED=1`.
 
