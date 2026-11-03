@@ -154,6 +154,29 @@ def expected_latest_session(exchange: str, now: datetime) -> date:
     return day
 
 
+def next_ready_at(exchange: str, now: datetime) -> datetime:
+    """The UTC instant from which the next end-of-day bar is expected: the first one still after ``now``.
+
+    That is the publishing time of the trading day after ``expected_latest_session``. It always lies after
+    ``now``: a later trading day closes later than ``now``, and any earlier one that was not yet due was
+    passed over when the latest session was chosen. Where this instant arrives, ``expected_latest_session``
+    moves on to the next day, so an answer that holds the newest sessions goes out of date then.
+    """
+    market = market_for(exchange)
+    day = expected_latest_session(exchange, now) + timedelta(days=1)
+    while day.weekday() in market.weekend:
+        day += timedelta(days=1)
+    return _ready_at(market, day)
+
+
+def session_on_or_before(exchange: str, day: date) -> date:
+    """``day`` when the exchange trades on it, else the trading day before it (a weekend goes back)."""
+    market = market_for(exchange)
+    while day.weekday() in market.weekend:
+        day -= timedelta(days=1)
+    return day
+
+
 def _count_sessions(earlier: date, later: date, weekend: Collection[int]) -> int:
     span = (later - earlier).days
     if span <= 0:

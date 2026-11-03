@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
-from eodhd_guard_mcp.ledger import RETENTION_DAYS, Budget, UsageLedger, next_gmt_reset
+from eodhd_guard_mcp.ledger import RETENTION_DAYS, Budget, UsageLedger, make_private, next_gmt_reset
 from tests.helpers import FixedClock
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
@@ -62,6 +62,38 @@ class TestOpen:
         add(ledger)
         siblings = [p for p in db_path.parent.iterdir() if p != db_path]
         assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in siblings)
+
+    @posix_only
+    def test_a_folder_and_database_that_were_open_to_others_are_closed_when_it_opens(
+        self, db_path: Path, clock: FixedClock
+    ) -> None:
+        first = UsageLedger(db_path, clock=clock)
+        add(first)
+        # Another setup left everything world-readable, the write-ahead files included.
+        db_path.parent.chmod(0o777)
+        for path in db_path.parent.iterdir():
+            path.chmod(0o666)
+        second = UsageLedger(db_path, clock=clock)
+        add(second)
+        assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+        modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in db_path.parent.iterdir()}
+        assert set(modes) >= {"usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm"}
+        assert set(modes.values()) == {0o600}
+        first.close()
+        second.close()
+
+    @posix_only
+    def test_a_chmod_that_is_refused_does_not_stop_it_opening(
+        self, db_path: Path, clock: FixedClock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def refuse(self: Path, mode: int) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(Path, "chmod", refuse)
+        opened = UsageLedger(db_path, clock=clock)
+        add(opened)
+        assert opened.spent_today() == 1
+        opened.close()
 
     def test_the_table_has_the_documented_columns(self, ledger: UsageLedger, db_path: Path) -> None:
         with sqlite3.connect(db_path) as conn:
@@ -115,6 +147,52 @@ class TestOpen:
             kept = sorted(row[0] for row in conn.execute("SELECT cost FROM calls"))
         reopened.close()
         assert kept == [0, RETENTION_DAYS - 1, RETENTION_DAYS]
+
+
+class TestMakePrivate:
+    @posix_only
+    def test_it_closes_the_folder_the_database_and_the_files_beside_it(self, tmp_path: Path) -> None:
+        state = tmp_path / "shared"
+        state.mkdir()
+        state.chmod(0o777)
+        names = ["usage.sqlite", "usage.sqlite-wal", "usage.sqlite-shm", "usage.sqlite-journal", "other.txt"]
+        for name in names:
+            (state / name).write_text("x", encoding="utf-8")
+            (state / name).chmod(0o666)
+        make_private(state / "usage.sqlite")
+        assert stat.S_IMODE(state.stat().st_mode) == 0o700
+        modes = {name: stat.S_IMODE((state / name).stat().st_mode) for name in names}
+        # Only the database and what SQLite keeps beside it; a file that is not ours is left alone.
+        assert modes == dict.fromkeys(names[:4], 0o600) | {"other.txt": 0o666}
+
+    @posix_only
+    def test_files_that_do_not_exist_are_skipped(self, tmp_path: Path) -> None:
+        (tmp_path / "state").mkdir()
+        make_private(tmp_path / "state" / "usage.sqlite")  # no database, no write-ahead files: no error
+        assert stat.S_IMODE((tmp_path / "state").stat().st_mode) == 0o700
+
+    @posix_only
+    def test_it_never_fails_on_a_refused_chmod(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        database = tmp_path / "usage.sqlite"
+        database.write_text("x", encoding="utf-8")
+        database.chmod(0o640)
+
+        def refuse(self: Path, mode: int) -> None:
+            raise PermissionError(1, "Operation not permitted")
+
+        monkeypatch.setattr(Path, "chmod", refuse)
+        make_private(database)
+        assert stat.S_IMODE(database.stat().st_mode) == 0o640
+
+    @posix_only
+    def test_windows_is_left_alone(self, tmp_path: Path) -> None:
+        database = tmp_path / "usage.sqlite"
+        database.write_text("x", encoding="utf-8")
+        database.chmod(0o666)
+        tmp_path.chmod(0o755)
+        make_private(database, platform="win32")
+        assert stat.S_IMODE(database.stat().st_mode) == 0o666
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
 
 
 class TestRecord:

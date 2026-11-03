@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import date
 from typing import Any
 
+import httpx2
 import pytest
 from mcp import Client
 from mcp.types import CallToolResult
 
 from eodhd_guard_mcp.config import Settings
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.server import Deps, build_deps, build_server
-from eodhd_guard_mcp.tools.fundamentals import _enforce_cap, parse_sections, parse_statements
+from eodhd_guard_mcp.tools.fundamentals import (
+    _enforce_cap,
+    _entry_weight,
+    _json_size,
+    parse_sections,
+    parse_statements,
+)
 from tests.helpers import TEST_KEY, FixedClock, MockEODHD, RecordingSleep, load_fixture
 
 pytestmark = pytest.mark.anyio
@@ -52,8 +62,9 @@ def warning_of(body: dict[str, Any], code: str) -> dict[str, Any]:
     return next(w for w in body["warnings"] if w["code"] == code)
 
 
-def compact_size(value: Any) -> int:
-    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+def sent_size(value: Any) -> int:
+    """Bytes of the text the SDK sends for ``value``: JSON indented by two spaces, not compact."""
+    return len(json.dumps(value, indent=2, ensure_ascii=False, default=str).encode("utf-8"))
 
 
 def everything(result: CallToolResult) -> str:
@@ -113,6 +124,45 @@ async def budgeted_client(
     await deps.aclose()
 
 
+@pytest.fixture
+async def slow_client(
+    settings: Settings,
+    mock_api: MockEODHD,
+    clock: FixedClock,
+    sleeps: RecordingSleep,
+    isolated_logging: None,
+) -> AsyncIterator[tuple[Client, Deps]]:
+    """A server whose EODHD takes a moment to answer, as a real one does, with room for two reads only."""
+    answers = mock_api.transport()
+
+    async def slow(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(0.01)  # MockEODHD answers at once; real I/O gives other calls a turn
+        return await answers.handle_async_request(request)
+
+    deps = build_deps(
+        replace(settings, daily_budget=25), transport=httpx2.MockTransport(slow), clock=clock, sleep=sleeps
+    )
+    async with Client(build_server(deps=deps)) as client:
+        yield client, deps
+    await deps.aclose()
+
+
+@pytest.fixture
+async def uncached_client(
+    settings: Settings,
+    mock_api: MockEODHD,
+    clock: FixedClock,
+    sleeps: RecordingSleep,
+    isolated_logging: None,
+) -> AsyncIterator[tuple[Client, Deps]]:
+    deps = build_deps(
+        replace(settings, cache_enabled=False), transport=mock_api.transport(), clock=clock, sleep=sleeps
+    )
+    async with Client(build_server(deps=deps)) as client:
+        yield client, deps
+    await deps.aclose()
+
+
 # --- one request, many reads ------------------------------------------------------------------------
 
 
@@ -141,6 +191,34 @@ async def test_one_request_serves_every_later_read_of_the_symbol(
     # No `filter` is sent, which is what makes every read share one cache entry.
     assert mock_api.requests[0].params == {"fmt": "json"}
     assert first["meta"]["endpoints"] == ["fundamentals"]
+
+
+async def test_parallel_reads_of_one_document_send_one_request_and_pay_for_it_once(
+    slow_client: tuple[Client, Deps], mock_api: MockEODHD
+) -> None:
+    client, deps = slow_client
+    mock_api.add(ACME, load_fixture("tools_fund_acme_stock"))
+    # A model that wants three views of one company asks for them in parallel. The budget (25) has room for
+    # two reads of 10 but not three, and three requests would have been paid for and refused alike.
+    results = await asyncio.gather(
+        fundamentals(client),
+        fundamentals(client, sections=["Highlights"]),
+        fundamentals(client, sections=["General"], statements=["income"]),
+    )
+    bodies = [body_of(result) for result in results]
+    assert mock_api.count("fundamentals") == 1
+    assert sorted(body["meta"]["cost"] for body in bodies) == [0, 0, 10]
+    assert sorted(body["meta"]["cached"] for body in bodies) == [False, True, True]
+    assert deps.ledger.spent_today() == 10
+    assert deps.budget.status()["remaining"] == 15
+    assert not any("BUDGET_EXCEEDED" in str(result.content) for result in results)
+    today = deps.ledger.summary()["today"]
+    assert (today["requests"], today["cache_hits"]) == (1, 2)
+    for body in bodies:
+        assert body["meta"]["fetched_at"] == bodies[0]["meta"]["fetched_at"]
+    # The reads that waited were told, like any other cache hit, where their answer came from.
+    waited = [body for body in bodies if body["meta"]["cached"]]
+    assert all(body["meta"]["notes"][0].startswith("Served from the local cache.") for body in waited)
 
 
 async def test_the_budget_refuses_a_read_it_cannot_afford_before_any_request(
@@ -196,6 +274,74 @@ async def test_the_note_says_what_the_first_read_bought(mcp_client: Client, mock
     assert "cost 0" in first["meta"]["notes"][0]
     assert second["meta"]["notes"][0].startswith("Served from the local cache.")
     assert "meta.fetched_at" in second["meta"]["notes"][0]
+
+
+async def test_with_the_cache_off_the_note_says_that_every_read_costs_ten(
+    uncached_client: tuple[Client, Deps], mock_api: MockEODHD
+) -> None:
+    client, deps = uncached_client
+    mock_api.add(ACME, load_fixture("tools_fund_acme_stock"))
+    first = body_of(await fundamentals(client))
+    second = body_of(await fundamentals(client, statements=["income"]))
+    assert (first["meta"]["cost"], second["meta"]["cost"]) == (10, 10)
+    assert (first["meta"]["cached"], second["meta"]["cached"]) == (False, False)
+    assert mock_api.count("fundamentals") == 2
+    assert deps.ledger.spent_today() == 20
+    for body in (first, second):
+        note = body["meta"]["notes"][0]
+        assert "is not cached" in note
+        assert "every read of this symbol costs 10 calls" in note
+        assert "cost 0" not in note
+        assert "cached for 24 hours" not in note
+
+
+async def test_with_the_cache_off_the_description_says_what_a_read_costs(
+    uncached_client: tuple[Client, Deps],
+) -> None:
+    client, _ = uncached_client
+    tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    description = tools["get_fundamentals"].description
+    assert description is not None
+    assert "Every read of a symbol costs 10 API calls" in description
+    assert "the cache is off" in description
+    assert "cached for 24 hours" not in description
+    assert "afterwards costs 0" not in description
+
+
+async def test_with_the_cache_on_the_description_still_promises_free_follow_up_reads(
+    mcp_client: Client,
+) -> None:
+    tools = {tool.name: tool for tool in (await mcp_client.list_tools()).tools}
+    description = tools["get_fundamentals"].description
+    assert description is not None
+    assert "cached for 24 hours" in description
+    assert "afterwards costs 0" in description
+
+
+async def test_with_the_cache_off_a_cut_answer_does_not_say_that_asking_again_is_free(
+    uncached_client: tuple[Client, Deps], mock_api: MockEODHD
+) -> None:
+    client, _ = uncached_client
+    mock_api.add(ACME, with_statements(acme(), income=60, balance=60, cashflow=60))
+    body = body_of(await fundamentals(client, statements=["income", "balance", "cashflow"], periods=40))
+    message = warning_of(body, "TRUNCATED")["message"]
+    assert "Ask again for fewer `statements` or `sections`" in message
+    assert "the cache is off, so another read costs 10 API calls" in message
+    assert "that costs nothing" not in message
+    assert "stays cached" not in message
+
+
+async def test_with_the_cache_off_an_empty_document_is_not_said_to_be_cached(
+    uncached_client: tuple[Client, Deps], mock_api: MockEODHD
+) -> None:
+    client, _ = uncached_client
+    mock_api.add(ACME, {})
+    text = error_text(await fundamentals(client))
+    assert "billed (10 calls) and the empty answer is not cached" in text
+    assert "cached for 24 hours" not in text
+    again = error_text(await fundamentals(client))
+    assert "billed (10 calls)" in again
+    assert mock_api.count("fundamentals") == 2
 
 
 # --- sections and defaults --------------------------------------------------------------------------
@@ -822,7 +968,7 @@ async def test_an_answer_under_the_cap_is_not_flagged(mcp_client: Client, mock_a
         )
     )
     assert "TRUNCATED" not in codes(body)
-    assert compact_size(body["data"]) < CAP_BYTES
+    assert sent_size(body["data"]) < CAP_BYTES
 
 
 def statement_data(periods: int) -> dict[str, Any]:
@@ -840,7 +986,7 @@ def kept_dates(data: dict[str, Any]) -> list[str]:
 
 def test_the_cap_is_inclusive_so_an_answer_of_exactly_the_cap_is_not_cut() -> None:
     data = statement_data(6)
-    size = compact_size(data)
+    size = sent_size(data)
     assert _enforce_cap(data, size) is None
     assert len(kept_dates(data)) == 6
     warning = _enforce_cap(data, size - 1)
@@ -850,15 +996,114 @@ def test_the_cap_is_inclusive_so_an_answer_of_exactly_the_cap_is_not_cut() -> No
 
 def test_the_cap_keeps_as_many_of_the_newest_periods_as_fit() -> None:
     data = statement_data(10)
-    # The size of four periods, to the byte: dropping a period also drops its separating comma.
-    fits_four = compact_size(statement_data(4))
+    # The size of four periods, to the byte: dropping a period also drops its comma, line break and indent.
+    fits_four = sent_size(statement_data(4))
     warning = _enforce_cap(data, fits_four)
     assert warning is not None
     assert kept_dates(data) == ["2026-12-01", "2026-11-01", "2026-10-01", "2026-09-01"]
-    assert compact_size(data) == fits_four
+    assert sent_size(data) == fits_four
     assert warning.details is not None
     assert warning.details["size_after"] == fits_four
     assert warning.details["cut"] == {"statements.income": "newest 4 of 10"}
+
+
+def test_the_size_is_the_indented_json_the_sdk_sends() -> None:
+    value = {"a": [{"b": "é日本"}, {"c": [1, 2]}], "d": {}}
+    assert _json_size(value) == sent_size(value)
+    assert _json_size(value) > len(json.dumps(value, separators=(",", ":")))
+    assert _json_size({"x": "é"}) == len(json.dumps({"x": "é"}, indent=2, ensure_ascii=False)) + 1
+
+
+def test_a_value_json_cannot_write_is_measured_as_text() -> None:
+    assert _json_size({"day": date(2026, 11, 2)}) == sent_size({"day": date(2026, 11, 2)})
+
+
+ENTRIES = [
+    {"date": "2026-09-30", "revenue": "1250000.00"},
+    {
+        "date": "2026-06-30",
+        "note": "é日本 \U0001f600",
+        "parts": [1, 2, {"deep": [3, {}]}],
+        "empty": {},
+        "none": [],
+    },
+    {"date": "2026-03-31", "currency": "USD", "text": "line one\nline two", "nested": {"a": {"b": {"c": 1}}}},
+    {"date": "2025-12-31"},
+]
+
+
+@pytest.mark.parametrize("entry", range(len(ENTRIES)))
+@pytest.mark.parametrize("series", ["Earnings.History", "statements.income", "outstandingShares.annual"])
+def test_the_weight_of_an_entry_is_what_dropping_it_takes_off_the_size(series: str, entry: int) -> None:
+    # Every list the cap cuts sits three levels down. Dropping its last entry takes off the entry itself, the
+    # comma and line break before it, and the indent of each of its lines.
+    def build(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if series.startswith("statements"):
+            return {
+                "symbol": "ACME.US",
+                "sections": {},
+                "statements": {"income": {"currency": "USD", "periods": rows}},
+            }
+        section, name = series.split(".")
+        return {"symbol": "ACME.US", "sections": {section: {name: rows}}}
+
+    rows = [ENTRIES[entry], ENTRIES[(entry + 1) % len(ENTRIES)]]
+    before = sent_size(build(rows))
+    after = sent_size(build(rows[:-1]))
+    assert before - after == _entry_weight(rows[-1], 3)
+
+
+@pytest.mark.parametrize("count", range(2, 9))
+def test_the_cap_leaves_exactly_the_newest_entries_that_fit(count: int) -> None:
+    rows = [{**ENTRIES[i % len(ENTRIES)], "date": f"2026-{12 - i:02d}-01"} for i in range(8)]
+    full = {
+        "symbol": "ACME.US",
+        "sections": {},
+        "statements": {"income": {"currency": "USD", "periods": rows}},
+    }
+    fits = copy.deepcopy(full)
+    fits["statements"]["income"]["periods"] = rows[:count]
+    cap = sent_size(fits)
+    data = copy.deepcopy(full)
+    warning = _enforce_cap(data, cap)
+    assert data["statements"]["income"]["periods"] == rows[:count]
+    assert sent_size(data) <= cap
+    if count < 8:
+        assert warning is not None
+        assert warning.details is not None
+        assert warning.details["size_after"] == sent_size(data)
+        assert warning.details["cut"] == {"statements.income": f"newest {count} of 8"}
+        # One byte less and the last entry that is left must go too.
+        again = copy.deepcopy(full)
+        _enforce_cap(again, cap - 1)
+        assert len(again["statements"]["income"]["periods"]) == max(count - 1, 1)
+
+
+def test_the_cap_cuts_several_series_and_reports_the_size_it_reached() -> None:
+    def rows(n: int, width: int) -> list[dict[str, Any]]:
+        return [
+            {"date": f"2026-{12 - i:02d}-01", "text": "é" * width, "list": [i, {"k": "v"}]} for i in range(n)
+        ]
+
+    data = {
+        "symbol": "ACME.US",
+        "sections": {"Earnings": {"History": rows(30, 40), "Trend": rows(20, 10)}},
+        "statements": {"income": {"currency": "USD", "periods": rows(25, 25)}},
+    }
+    total = sent_size(data)
+    warning = _enforce_cap(data, total // 2)
+    assert warning is not None
+    assert warning.details is not None
+    assert sent_size(data) <= total // 2
+    assert warning.details["size_before"] == total
+    assert warning.details["size_after"] == sent_size(data)
+    kept = [
+        len(data["sections"]["Earnings"]["History"]),
+        len(data["sections"]["Earnings"]["Trend"]),
+        len(data["statements"]["income"]["periods"]),
+    ]
+    assert all(n >= 1 for n in kept)
+    assert sum(kept) < 75
 
 
 async def test_a_huge_answer_is_cut_to_the_cap_keeping_the_newest_periods(
@@ -868,10 +1113,12 @@ async def test_a_huge_answer_is_cut_to_the_cap_keeping_the_newest_periods(
     body = body_of(await fundamentals(mcp_client, statements=["income", "balance", "cashflow"], periods=40))
     data = body["data"]
     truncated = warning_of(body, "TRUNCATED")
-    assert compact_size(data) <= CAP_BYTES
+    assert sent_size(data) <= CAP_BYTES
+    # No more was cut than it took: one more period of any series would have gone over the cap.
+    assert sent_size(data) > CAP_BYTES - 6_000
     assert truncated["details"]["limit_bytes"] == CAP_BYTES
     assert truncated["details"]["size_before"] > CAP_BYTES
-    assert truncated["details"]["size_after"] == compact_size(data)
+    assert truncated["details"]["size_after"] == sent_size(data)
     assert truncated["details"]["omitted"] == []
     cut = truncated["details"]["cut"]
     assert set(cut) <= {"statements.income", "statements.balance", "statements.cashflow", "Earnings.History"}
@@ -900,7 +1147,7 @@ async def test_the_cap_takes_from_the_largest_series_first(mcp_client: Client, m
             mcp_client, sections=["General"], statements=["income", "balance", "cashflow"], periods=40
         )
     )
-    assert compact_size(body["data"]) <= CAP_BYTES
+    assert sent_size(body["data"]) <= CAP_BYTES
     assert list(warning_of(body, "TRUNCATED")["details"]["cut"]) == ["statements.income"]
     assert len(body["data"]["statements"]["balance"]["periods"]) == 40
     assert len(body["data"]["statements"]["cashflow"]["periods"]) == 40
@@ -920,16 +1167,17 @@ async def test_whole_sections_go_only_when_cutting_periods_is_not_enough(
     assert truncated["details"]["omitted"] == ["ESGScores"]
     assert "Whole sections were dropped (ESGScores)" in truncated["message"]
     assert list(body["data"]["sections"]) == ["General", "Earnings"]
-    assert compact_size(body["data"]) <= CAP_BYTES
+    assert sent_size(body["data"]) <= CAP_BYTES
 
 
 async def test_a_statement_can_be_dropped_whole_as_a_last_resort(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     doc = acme()
-    # One period so big that it cannot be cut to fit; the other statement is small.
+    # One period so big that it cannot be cut to fit; the other statement is small. A long text would not do:
+    # texts are cut to 200 characters, so the size has to come from the number of fields.
     big = doc["Financials"]["Income_Statement"]["quarterly"]["2026-09-30"]
-    big["hugeField"] = "x" * 200_000
+    big.update({f"field{i:05d}": "1234567.00" for i in range(12_000)})
     mock_api.add(ACME, doc)
     body = body_of(
         await fundamentals(mcp_client, sections=["General"], statements=["income", "balance"], periods=1)
@@ -937,20 +1185,143 @@ async def test_a_statement_can_be_dropped_whole_as_a_last_resort(
     truncated = warning_of(body, "TRUNCATED")
     assert truncated["details"]["omitted"] == ["statements.income"]
     assert list(body["data"]["statements"]) == ["balance"]
-    assert compact_size(body["data"]) <= CAP_BYTES
+    assert sent_size(body["data"]) <= CAP_BYTES
 
 
 async def test_a_general_section_that_alone_exceeds_the_cap_is_reported_not_hidden(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     doc = acme()
-    doc["General"]["Extra"] = "x" * 200_000
+    doc["General"]["Extra"] = {f"key{i:05d}": "x" * 30 for i in range(6_000)}
     mock_api.add(ACME, doc)
     body = body_of(await fundamentals(mcp_client, sections=["General"]))
     truncated = warning_of(body, "TRUNCATED")
     assert "Nothing more could be cut." in truncated["message"]
     assert truncated["details"]["size_after"] > CAP_BYTES
     assert list(body["data"]["sections"]) == ["General"]
+
+
+# --- text from the vendor ---------------------------------------------------------------------------
+
+LONG = "Alexander Hamilton Holdings " * 30
+CUT = clip(LONG.strip())
+
+
+async def test_long_names_and_other_texts_are_cut_to_200_characters_with_an_ellipsis(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    assert 190 < len(CUT) <= 200
+    assert CUT.endswith("...")
+    doc = acme()
+    doc["General"].update({"Name": LONG, "Sector": LONG, "Industry": LONG, "CountryName": LONG})
+    doc["Holders"]["Institutions"]["0"]["name"] = LONG
+    doc["InsiderTransactions"]["0"]["ownerName"] = LONG
+    mock_api.add(ACME, doc)
+    body = body_of(await fundamentals(mcp_client, sections=["General", "Holders", "InsiderTransactions"]))
+    data = body["data"]
+    general = data["sections"]["General"]
+    assert data["name"] == CUT
+    assert (general["Name"], general["Sector"], general["Industry"], general["CountryName"]) == (CUT,) * 4
+    assert data["sections"]["Holders"]["Institutions"][0]["name"] == CUT
+    assert data["sections"]["InsiderTransactions"][0]["ownerName"] == CUT
+    assert LONG.strip() not in json.dumps(body)
+
+
+async def test_the_description_keeps_its_own_limit_of_500_characters(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    doc = acme()
+    doc["General"]["Description"] = "d" * 450
+    mock_api.add(ACME, doc)
+    kept = body_of(await fundamentals(mcp_client, sections=["General"]))
+    assert kept["data"]["sections"]["General"]["Description"] == "d" * 450
+    doc["General"]["Description"] = "d" * 900
+    mock_api.add("fundamentals/LONGD.US", doc)
+    cut = body_of(await fundamentals(mcp_client, symbol="LONGD.US", sections=["General"]))
+    description = cut["data"]["sections"]["General"]["Description"]
+    assert len(description) == 500
+    assert description.endswith("...")
+
+
+async def test_the_text_fields_of_an_etf_are_cut_too(mcp_client: Client, mock_api: MockEODHD) -> None:
+    doc = copy.deepcopy(load_fixture("tools_fund_etf"))
+    doc["ETF_Data"]["Company_Name"] = LONG
+    doc["ETF_Data"]["Index_Name"] = LONG
+    doc["ETF_Data"]["Top_10_Holdings"]["HLD00.US"]["Name"] = LONG
+    mock_api.add("fundamentals/ACMX.US", doc)
+    etf = body_of(await fundamentals(mcp_client, symbol="ACMX.US"))["data"]["sections"]["ETF_Data"]
+    assert (etf["Company_Name"], etf["Index_Name"]) == (CUT, CUT)
+    assert etf["Top_10_Holdings"]["HLD00.US"]["Name"] == CUT
+
+
+async def test_short_texts_and_numbers_pass_through_untouched(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(ACME, load_fixture("tools_fund_acme_stock"))
+    data = body_of(await fundamentals(mcp_client, sections=["General", "Highlights"]))["data"]
+    assert data["name"] == "Acme Industrial Holdings"
+    assert data["sections"]["General"]["Sector"] == "Industrials"
+    assert data["sections"]["Highlights"]["DividendYield"] == acme()["Highlights"]["DividendYield"]
+
+
+async def test_a_long_currency_stays_out_of_the_sentence_and_is_cut_in_the_details(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    doc = acme()
+    doc["Financials"]["Income_Statement"]["currency_symbol"] = LONG
+    for row in doc["Financials"]["Income_Statement"]["quarterly"].values():
+        row["currency_symbol"] = LONG
+    mock_api.add(ACME, doc)
+    body = body_of(await fundamentals(mcp_client, statements=["income"], sections=["General"]))
+    mismatch = warning_of(body, "CURRENCY_MISMATCH")
+    assert mismatch["details"]["statement_currencies"] == {"income": [CUT]}
+    assert f"income: {clip(LONG.strip(), 12)}" in mismatch["message"]
+    assert "Hamilton" not in mismatch["message"]
+
+
+# --- documents that are not what they should be -----------------------------------------------------
+
+
+@pytest.mark.parametrize("holdings", [5, 2.5, True, "many", None, []], ids=repr)
+async def test_holdings_that_are_not_a_list_do_not_crash_the_etf_trimmer(
+    mcp_client: Client, mock_api: MockEODHD, holdings: Any
+) -> None:
+    doc = copy.deepcopy(load_fixture("tools_fund_etf"))
+    doc["ETF_Data"]["Holdings"] = holdings
+    mock_api.add("fundamentals/ACMX.US", doc)
+    body = body_of(await fundamentals(mcp_client, symbol="ACMX.US"))
+    assert "Holdings" not in body["data"]["sections"]["ETF_Data"]
+    assert any("ETF_Data.Holdings (0 positions) dropped" in note for note in body["meta"]["notes"])
+
+
+async def test_holdings_that_are_a_list_or_a_dict_are_counted(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    doc = copy.deepcopy(load_fixture("tools_fund_etf"))
+    doc["ETF_Data"]["Holdings"] = {"a": {}, "b": {}, "c": {}}
+    mock_api.add("fundamentals/ACMX.US", doc)
+    body = body_of(await fundamentals(mcp_client, symbol="ACMX.US"))
+    assert any("ETF_Data.Holdings (3 positions) dropped" in note for note in body["meta"]["notes"])
+
+
+async def test_a_number_too_large_for_a_float_is_not_a_number(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    doc = acme()
+    doc["SplitsDividends"]["NumberDividendsByYear"] = {
+        "0": {"Year": 10**400, "Count": 1},
+        "1": {"Year": 2025, "Count": 4},
+        "2": {"Year": 2024, "Count": 4},
+    }
+    doc["Highlights"]["DividendYield"] = 10**400
+    doc["SplitsDividends"]["ForwardAnnualDividendRate"] = 0.8
+    mock_api.add(ACME, doc)
+    body = body_of(await fundamentals(mcp_client, sections=["Highlights", "SplitsDividends"]))
+    years = body["data"]["sections"]["SplitsDividends"]["NumberDividendsByYear"]
+    # The row whose year is no number sorts as year 0, after the real ones.
+    assert [row["Year"] for row in years] == [2025, 2024, 10**400]
+    # A yield that is not a number is not a yield of 0 either.
+    assert "DIVIDEND_YIELD_INCONSISTENT" not in codes(body)
 
 
 # --- errors -----------------------------------------------------------------------------------------

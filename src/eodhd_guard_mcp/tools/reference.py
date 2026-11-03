@@ -24,8 +24,10 @@ from eodhd_guard_mcp.envelope import ToolResponse, ToolWarning, WarningCode, bui
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
 from eodhd_guard_mcp.freshness import Freshness, assess, stale_warning
 from eodhd_guard_mcp.markets import expected_latest_session
-from eodhd_guard_mcp.redact import redact
+from eodhd_guard_mcp.redact import clip, redact
+from eodhd_guard_mcp.semantics import is_filler_bar, normalize_eod_rows
 from eodhd_guard_mcp.tools import READ_ONLY, guarded
+from eodhd_guard_mcp.tools.prices import recent_bars_ttl_s
 from eodhd_guard_mcp.validation import Symbol, iso_date_or_none, parse_exchange, parse_symbol
 
 if TYPE_CHECKING:
@@ -48,6 +50,10 @@ SEARCH_POOL = 50
 MAX_CANDIDATES = 5
 MAX_TYPES_SHOWN = 8
 MAX_SYMBOLS_IN_WARNING = 10
+IDENTIFIER_CHARS = 24
+"""A symbol the vendor gave is cut to this length where a sentence names it; the data holds it whole."""
+TYPE_CHARS = 30
+"""The same for an instrument type named in a sentence."""
 
 SearchType = Literal["all", "stock", "etf", "fund", "bonds", "index", "crypto"]
 
@@ -84,9 +90,9 @@ T = TypeVar("T")
 
 
 def _text(value: object) -> str | None:
-    """A non-empty string from an upstream field; anything else is None."""
+    """A non-empty string from an upstream field, cut to ``TEXT_LIMIT`` characters; else None."""
     if isinstance(value, str):
-        return value.strip() or None
+        return clip(value.strip()) or None
     return None
 
 
@@ -170,10 +176,6 @@ def _read_rows(body: object, endpoint: str, reader: Callable[[object], T | None]
     if body and not rows:
         raise _bad_answer(endpoint, f"has {len(body)} rows, none of them readable")
     return rows
-
-
-def _day_or_none(raw: object) -> date | None:
-    return iso_date_or_none(raw.get("date")) if isinstance(raw, dict) else None
 
 
 def _iso(day: date | None) -> str | None:
@@ -297,7 +299,9 @@ def _empty_list_error(exchange: str, delisted: bool) -> GuardError:
 
 def _types_present(rows: Sequence[dict[str, Any]]) -> str:
     counts = Counter(_type_key(row["type"]) or "unknown" for row in rows)
-    return ", ".join(f"{name} ({count})" for name, count in counts.most_common(MAX_TYPES_SHOWN))
+    return ", ".join(
+        f"{clip(name, TYPE_CHARS)} ({count})" for name, count in counts.most_common(MAX_TYPES_SHOWN)
+    )
 
 
 def _no_match_warning(
@@ -400,11 +404,17 @@ async def list_exchange_symbols(
         "next_offset": next_offset,
         "symbols": page,
     }
-    notes = [
-        "Filtering and paging run here on one cached list: more pages and other filters for this exchange "
-        "cost 0 until the cache expires (24 hours)."
-    ]
-    return build_response(data, [response], warnings=warnings, notes=notes)
+    if deps.settings.cache_enabled:
+        note = (
+            "Filtering and paging run here on one cached list: more pages and other filters for this "
+            "exchange cost 0 until the cache expires (24 hours)."
+        )
+    else:
+        note = (
+            "Filtering and paging run here on the whole list. The cache is off, so every page and filter "
+            f"fetches it again and costs {cost_for('exchange-symbol-list')} API call."
+        )
+    return build_response(data, [response], warnings=warnings, notes=[note])
 
 
 # --- search_symbols ---------------------------------------------------------------------------------
@@ -497,7 +507,7 @@ def _hit_row(hit: _Hit, inactive: bool) -> dict[str, Any]:
 
 
 def _listing(symbols: Sequence[str]) -> str:
-    shown = ", ".join(symbols[:MAX_SYMBOLS_IN_WARNING])
+    shown = ", ".join(clip(symbol, IDENTIFIER_CHARS) for symbol in symbols[:MAX_SYMBOLS_IN_WARNING])
     return shown + (
         f" and {len(symbols) - MAX_SYMBOLS_IN_WARNING} more" if len(symbols) > MAX_SYMBOLS_IN_WARNING else ""
     )
@@ -590,10 +600,15 @@ async def search_symbols(
 
 @dataclass(frozen=True)
 class _Bars:
-    """What the end-of-day probe found. ``found`` is False after a 404."""
+    """What the end-of-day probe found. ``found`` is False after a 404.
+
+    ``last_bar`` is the newest real bar. ``fillers`` counts the holiday filler bars dated after it, which
+    EODHD sends for days with no trading and which are never read as signs of life.
+    """
 
     found: bool
     last_bar: date | None = None
+    fillers: int = 0
     response: ApiResponse | None = None
 
 
@@ -631,6 +646,7 @@ class _Case:
     window: tuple[date, date]
     quote: _QuoteProbe | None
     successors: _Successors
+    fillers: int = 0
 
 
 def _brief(exc: GuardError, deps: Deps) -> str:
@@ -638,8 +654,12 @@ def _brief(exc: GuardError, deps: Deps) -> str:
     return redact(f"{exc.code.value}: {exc.message}", [deps.settings.api_key])
 
 
-async def _probe_bars(deps: Deps, symbol: Symbol, window: tuple[date, date]) -> _Bars:
-    """The last 14 days of daily bars. A 404 is a finding; any other failure is raised."""
+async def _probe_bars(deps: Deps, symbol: Symbol, window: tuple[date, date], now: datetime) -> _Bars:
+    """The last 14 days of daily bars. A 404 is a finding; any other failure is raised.
+
+    Rows are read as ``get_eod_prices`` reads them, and holiday filler bars are set aside: they repeat the
+    last close with no volume, so they are not a sign that the line still trades.
+    """
     start, end = window
     try:
         response = await deps.client.get(
@@ -647,15 +667,19 @@ async def _probe_bars(deps: Deps, symbol: Symbol, window: tuple[date, date]) -> 
             {"from": start.isoformat(), "to": end.isoformat(), "period": "d", "order": "a"},
             endpoint="eod",
             cost=cost_for("eod"),
-            ttl_s=CHECK_BARS_TTL_S,
+            # The window reaches today, so the answer goes out of date when the next bar is due.
+            ttl_s=recent_bars_ttl_s(symbol.exchange, now, cap_s=CHECK_BARS_TTL_S),
+            max_age_s=CHECK_BARS_TTL_S,
             symbol=symbol.full,
         )
     except GuardError as exc:
         if exc.code is ErrorCode.NOT_FOUND:
             return _Bars(found=False)
         raise
-    days = _read_rows(response.data, "eod", _day_or_none)
-    return _Bars(found=True, last_bar=max(days, default=None), response=response)
+    bars = normalize_eod_rows(response.data)
+    last_bar = max((bar.day for bar in bars if not is_filler_bar(bar)), default=None)
+    fillers = sum(1 for bar in bars if is_filler_bar(bar) and (last_bar is None or bar.day > last_bar))
+    return _Bars(found=True, last_bar=last_bar, fillers=fillers, response=response)
 
 
 async def _probe_quote(deps: Deps, symbol: Symbol) -> _QuoteProbe:
@@ -831,15 +855,20 @@ def _finding(case: _Case) -> str:
         return f"EODHD does not know {name}: the end-of-day endpoint answered 404."
     if case.status == "stale" and fr.last_bar is None:
         start, end = case.window
-        return (
-            f"{name} has no end-of-day bars from {start} to {end}, although a bar for "
-            f"{fr.expected_latest} should exist: the code looks dead."
-        )
+        only = f" (only {_plural(case.fillers, 'holiday filler bar')})" if case.fillers else ""
+        seen = f"has no {'real ' if case.fillers else ''}end-of-day bars from {start} to {end}{only}"
+        return f"{name} {seen}, although a bar for {fr.expected_latest} should exist: the code looks dead."
     behind = _plural(fr.sessions_behind, "session")
     if case.status == "stale":
+        ignored = (
+            f" EODHD also sent {_plural(case.fillers, 'filler bar')} dated after it (zero volume, open = "
+            "high = low = close), which do not count as trading."
+            if case.fillers
+            else ""
+        )
         return (
             f"{name} looks frozen: its newest bar is {fr.last_bar}, {behind} behind the latest "
-            f"expected ({fr.expected_latest})."
+            f"expected ({fr.expected_latest}).{ignored}"
         )
     if case.status == "no_quote":
         return (
@@ -854,32 +883,36 @@ def _finding(case: _Case) -> str:
     )
 
 
-def _describe_candidate(candidate: dict[str, Any]) -> str:
-    details = [candidate["name"], f"ISIN {candidate['isin']}" if candidate["isin"] else None]
-    shown = ", ".join(part for part in details if part)
-    return f"{candidate['symbol']} ({shown})" if shown else str(candidate["symbol"])
-
-
 def _identity_sentence(case: _Case) -> str:
-    """What the delisted list said about the line, when it was consulted and had something to say."""
+    """What the delisted list said about the line, when it was consulted and had something to say.
+
+    The sentences name no company: what the vendor calls one is text of its own, and it is in the data.
+    """
     found, symbol = case.successors, case.symbol
     if found.clashing_names:
-        names = "; ".join(repr(name) for name in found.clashing_names)
         return (
             f"The delisted list for {symbol.exchange} holds {len(found.clashing_names)} different "
-            f"companies under the code {symbol.code} ({names}), so its name could not be settled."
+            f"companies under the code {symbol.code}, so its name could not be settled; they are named "
+            "in clashing_names."
         )
     if found.delisted:
-        return f"EODHD's delisted list for {symbol.exchange} has {symbol.code} as {found.name!r}."
+        return (
+            f"EODHD's delisted list for {symbol.exchange} has {symbol.code}; its name and ISIN are in "
+            "name and isin."
+        )
     return ""
 
 
 def _next_step(case: _Case) -> str:
     found = case.successors
     if found.candidates:
-        listing = "; ".join(_describe_candidate(c) for c in found.candidates)
-        label = "Possible successors" if len(found.candidates) > 1 else "Possible successor"
-        return f"{label}: {listing}. Compare the ISIN and name with this line before switching."
+        symbols = ", ".join(clip(str(c["symbol"]), IDENTIFIER_CHARS) for c in found.candidates)
+        many = len(found.candidates) > 1
+        return (
+            f"{'Possible successors' if many else 'Possible successor'}: {symbols}. Compare "
+            f"{'their' if many else 'its'} ISIN and name (see successor_candidates) with this line's "
+            "before switching."
+        )
     if case.status in {"ok", "no_quote"}:
         return ""
     if found.error:
@@ -900,8 +933,9 @@ def _next_step(case: _Case) -> str:
             "company name."
         )
     return (
-        f"No other code on {case.symbol.exchange} with a recent price matches {found.name!r}. The company "
-        "may have changed its name as well as its code: try search_symbols with the new name."
+        f"No other code on {case.symbol.exchange} with a recent price matches the name found for this line "
+        "(see name). The company may have changed its name as well as its code: try search_symbols with "
+        "the new name."
     )
 
 
@@ -942,6 +976,7 @@ def _not_covered(symbol: Symbol, now: datetime, refusal: GuardError) -> ToolResp
         "quote_status": None,
         "name": None,
         "isin": None,
+        "clashing_names": [],
         "successor_candidates": [],
         "advice": (
             f"{symbol.full} is on the {market}, which EODHD does not cover, so nothing was looked up and "
@@ -969,7 +1004,7 @@ async def check_symbol(
 
     today = now.date()
     window = (today - timedelta(days=CHECK_WINDOW_DAYS), today)
-    bars = await _probe_bars(deps, symbol, window)
+    bars = await _probe_bars(deps, symbol, window, now)
     responses: list[ApiResponse] = [bars.response] if bars.response is not None else []
     quote = await _probe_quote(deps, symbol) if include_quote else None
     if quote is not None and quote.response is not None:
@@ -982,7 +1017,7 @@ async def check_symbol(
         # A line with current bars is not delisted, so only a dead one is looked up in the delisted list.
         successors = await _find_successors(deps, symbol, now, responses, delisted_too=status != "no_quote")
 
-    case = _Case(symbol, status, freshness, window, quote, successors)
+    case = _Case(symbol, status, freshness, window, quote, successors, bars.fillers)
     data = {
         "symbol": symbol.full,
         "status": status,
@@ -992,6 +1027,7 @@ async def check_symbol(
         "quote_status": quote.status if quote is not None else None,
         "name": successors.name,
         "isin": successors.isin,
+        "clashing_names": successors.clashing_names,
         "successor_candidates": successors.candidates,
         "advice": _advice(case),
     }

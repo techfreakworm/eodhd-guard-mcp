@@ -10,6 +10,7 @@ import contextlib
 import logging
 import os
 import sqlite3
+import sys
 import threading
 from collections.abc import Callable, Sequence
 from datetime import datetime, time, timedelta, timezone
@@ -40,6 +41,24 @@ CREATE INDEX IF NOT EXISTS calls_day ON calls (day);
 """
 
 _STATE_HINT = "Check that EODHD_GUARD_STATE_DIR is a writable folder."
+_SIDE_FILES = ("-wal", "-shm", "-journal")
+"""What SQLite keeps beside a database, as endings of its file name."""
+
+
+def make_private(database: Path, *, platform: str | None = None) -> None:
+    """Close the state folder, the database and SQLite's files beside it to every other user.
+
+    A folder or file that already exists keeps the mode it was made with, and SQLite gives its ``-wal`` and
+    ``-shm`` files the mode of the database, so a state folder that was shared before would stay open. This
+    is best effort: a folder the user does not own is left as it is, and so is a system without POSIX modes.
+    """
+    if (platform or sys.platform) == "win32":
+        return
+    targets = [(database.parent, 0o700), (database, 0o600)]
+    targets += [(database.with_name(database.name + ending), 0o600) for ending in _SIDE_FILES]
+    for target, mode in targets:
+        with contextlib.suppress(OSError):
+            target.chmod(mode)
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -47,6 +66,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        make_private(path)  # before SQLite makes its own files, which copy the mode of the database
         conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     except (OSError, sqlite3.Error) as exc:
         raise GuardError(
@@ -57,6 +77,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     with contextlib.suppress(sqlite3.Error):
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+    make_private(path)  # write-ahead files left by an earlier run keep the mode they had
     return conn
 
 

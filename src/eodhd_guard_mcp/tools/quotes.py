@@ -169,7 +169,11 @@ def _read_quote(
         "age_seconds": max(0, int((now - moment).total_seconds())),
         "delayed": True,
     }
-    quote_day = moment.astimezone(ZoneInfo(market_for(symbol.exchange).tz)).date()
+    try:
+        quote_day = moment.astimezone(ZoneInfo(market_for(symbol.exchange).tz)).date()
+    except OverflowError:  # the last instant a datetime holds is past year 9999 on a market ahead of UTC
+        entry, warning = _no_quote(symbol, row)
+        return entry, [warning]
     freshness = assess(symbol.exchange, quote_day, now, threshold=threshold)
     warnings = [_stale_quote_warning(symbol, moment, quote_day, freshness)] if freshness.stale else []
     return entry, warnings

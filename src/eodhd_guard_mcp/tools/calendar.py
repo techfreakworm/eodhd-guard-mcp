@@ -23,6 +23,7 @@ from eodhd_guard_mcp.coverage import GAPS, CoverageGap, ensure_covered, find_gap
 from eodhd_guard_mcp.envelope import ToolResponse, ToolWarning, WarningCode, build_response
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
 from eodhd_guard_mcp.markets import market_for
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.tools import READ_ONLY, guarded
 from eodhd_guard_mcp.validation import (
     Symbol,
@@ -58,6 +59,8 @@ PLANS_BY_ENDPOINT = {
     "splits": ("split history", HISTORY_PLANS),
 }
 SPLIT_FACTOR_BAND = (0.8, 1.25)
+CURRENCY_CHARS = 12
+"""A currency the vendor gave is cut to this length where a sentence names it; the details keep it whole."""
 
 _TIMING = {"BeforeMarket": "before_market", "AfterMarket": "after_market"}
 _EPSILON = 1e-9
@@ -116,18 +119,24 @@ def _mapping(value: Any) -> dict[str, Any]:
 
 
 def _text(value: object) -> str | None:
-    """A non-blank string, stripped; null, ``"NA"`` and anything that is not text are None."""
+    """A non-blank string, stripped and cut to ``TEXT_LIMIT`` characters; else None (``"NA"`` too)."""
     if isinstance(value, str) and value.strip() not in ("", "NA"):
-        return value.strip()
+        return clip(value.strip())
     return None
 
 
 def _to_float(value: object) -> float | None:
-    """A finite number from a JSON number or a numeric string; everything else, ``"NA"`` included, is None."""
+    """A finite number from a JSON number or a numeric string; everything else, ``"NA"`` included, is None.
+
+    An integer too large for a float is not a number either.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            return None
     elif isinstance(value, str):
         try:
             number = float(value.strip())
@@ -574,26 +583,55 @@ def _read_dividend(raw: object, today: dt.date) -> dict[str, Any] | None:
 
 
 def _dividend_currency_warning(symbol: Symbol, rows: Sequence[Mapping[str, Any]]) -> ToolWarning | None:
-    """CURRENCY_MISMATCH when a London line's dividends are not in pence; CURRENCY_NOTE when they are."""
+    """CURRENCY_MISMATCH when a London line's dividends are not in pence; CURRENCY_NOTE when they are.
+
+    Only a currency that a row names counts. When no row names one there is nothing to warn about (see
+    ``_unknown_currency_note``), and when some rows name none, the sentence speaks for the rows that do.
+    """
     quote = market_for(symbol.exchange).currency_hint
     if quote is None or not rows:
         return None
     paid = sorted({row["currency"] for row in rows if row["currency"]})
+    if not paid:
+        return None
+    unnamed = sum(1 for row in rows if not row["currency"])
+    whose = "the dividends that name a currency" if unnamed else "its dividends"
+    gap = f" {unnamed} of the {len(rows)} dividends name no currency." if unnamed else ""
     differing = [currency for currency in paid if currency.upper() != quote]
+    # EODHD's dividend answer does not say what currency the line is quoted in, and a few London lines are
+    # quoted in dollars or euros. So the sentences say what is usual, and where the line's own currency is.
     if not differing:
         return ToolWarning.of(
             WarningCode.CURRENCY_NOTE,
-            f"{symbol.full} is quoted in {quote} (pence), and its dividends are in {quote} too.",
+            f"{symbol.full}: London lines are usually quoted in {quote} (pence), and {whose} are in "
+            f"{quote} too.{gap}",
             quote_currency=quote,
         )
     factor = " For GBP against GBX the factor is 100." if "GBP" in differing else ""
+    shown = ", ".join(clip(currency, CURRENCY_CHARS) for currency in differing)
     return ToolWarning.of(
         WarningCode.CURRENCY_MISMATCH,
-        f"{symbol.full} is quoted in {quote} (pence), but its dividends are in {', '.join(differing)}. "
-        f"Convert one side before comparing a dividend with the share price (yield, payout).{factor}",
+        f"{symbol.full}: London lines are usually quoted in {quote} (pence), but {whose} are in "
+        f"{shown}.{gap} The line's own quote currency is in list_exchange_symbols. If it is {quote}, "
+        f"convert one side before comparing a dividend with the share price (yield, payout).{factor}",
         quote_currency=quote,
         dividend_currencies=paid,
     )
+
+
+def _unknown_currency_note(symbol: Symbol, rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """A note, for a London line whose dividends all lack a currency, that the currency is unknown.
+
+    No warning is raised from nothing, but the pence-or-pounds question the warnings answer is still open.
+    """
+    quote = market_for(symbol.exchange).currency_hint
+    if quote is None or not rows or any(row["currency"] for row in rows):
+        return []
+    return [
+        f"No dividend for {symbol.full} names a currency, so the currency of the dividends is unknown. "
+        f"London lines are usually quoted in {quote} (pence): check the currency of the line "
+        "(list_exchange_symbols) and of the dividends before comparing a dividend with the share price."
+    ]
 
 
 async def dividends(
@@ -674,6 +712,7 @@ async def dividends(
     notes = [
         "value is adjusted for splits; unadjusted_value is the amount as declared at the time. ex_date is "
         "the first day the shares trade without the dividend. A date EODHD does not have is null.",
+        *_unknown_currency_note(symbol, shown),
         *_skipped_note(len(parsed) - len(readable), "ex-date"),
     ]
     return build_response(data, [response], warnings=warnings, notes=notes)

@@ -18,7 +18,7 @@ from mcp.types import CallToolResult
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
 from eodhd_guard_mcp.semantics import PRICE_BASIS_NOTES
 from eodhd_guard_mcp.server import Deps
-from eodhd_guard_mcp.tools.prices import fetch_eod_prices, fetch_intraday_prices
+from eodhd_guard_mcp.tools.prices import fetch_eod_prices, fetch_intraday_prices, recent_bars_ttl_s
 from tests.helpers import TEST_KEY, FixedClock, MockEODHD, load_fixture
 
 pytestmark = pytest.mark.anyio
@@ -620,6 +620,210 @@ async def test_the_session_calendar_of_the_symbols_market_is_used(
     stale = warning_of(india.structured_content, "STALE_DATA")
     assert (stale["details"]["expected_latest"], stale["details"]["sessions_behind"]) == ("2026-11-03", 3)
     assert "STALE_DATA" not in codes(america.structured_content)
+
+
+@pytest.mark.parametrize("days_later", [0, 1, 2, 3])
+async def test_a_complete_range_that_ended_days_ago_is_not_stale_however_late_it_is_read(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock, acme: list[dict[str, Any]], days_later: int
+) -> None:
+    # All 22 October sessions are here. Read on Tue 11-03, Wed 11-04, Thu 11-05 or Fri 11-06, the newest
+    # bar (10-30) is 1, 2, 3 or 4 sessions before the latest one due, but the range ended on Saturday
+    # 10-31, whose last session is 10-30: nothing is missing.
+    clock.advance(days=days_later)
+    mock_api.add("eod/ACME.US", between(acme, "2026-10-01", "2026-10-30"))
+    result = await call_eod(mcp_client, start="2026-10-01", end="2026-10-31")
+    body = result.structured_content
+    assert body is not None
+    assert body["data"]["count"] == 22
+    assert body["data"]["last_date"] == "2026-10-30"
+    assert "STALE_DATA" not in codes(body)
+
+
+async def test_a_range_that_stops_before_its_own_end_is_stale_against_the_range_not_against_today(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    clock.advance(days=2)  # Thursday 2026-11-05; the latest session due is Wednesday 11-04
+    mock_api.add("eod/ACME.US", [bar("2026-10-14"), bar("2026-10-20")])
+    result = await call_eod(mcp_client, start="2026-10-14", end="2026-10-31")
+    body = result.structured_content
+    assert body is not None
+    stale = warning_of(body, "STALE_DATA")
+    # Eight sessions (10-21 to 10-30) are missing from the range itself, not the ten up to today.
+    assert stale["details"] == {
+        "symbol": "ACME.US",
+        "last_bar": "2026-10-20",
+        "expected_latest": "2026-10-30",
+        "sessions_behind": 8,
+    }
+    assert "the range ends on 2026-10-31, whose last session is 2026-10-30" in stale["message"]
+    assert "latest session expected by now" not in stale["message"]
+
+
+async def test_a_range_that_reaches_today_is_still_judged_against_the_latest_session_due(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [bar("2026-10-14"), bar("2026-10-20")])
+    result = await call_eod(mcp_client, start="2026-10-14")  # ends today, Tuesday 11-03
+    body = result.structured_content
+    assert body is not None
+    stale = warning_of(body, "STALE_DATA")
+    assert stale["details"]["expected_latest"] == "2026-11-02"
+    assert stale["details"]["sessions_behind"] == 9
+    assert "latest session expected by now is 2026-11-02" in stale["message"]
+
+
+@pytest.mark.parametrize(
+    ("end", "last_bar", "stale"),
+    [
+        ("2026-10-31", "2026-10-27", True),  # three sessions (10-28 to 10-30) short of the last, 10-30
+        ("2026-10-31", "2026-10-28", False),  # two short
+        ("2026-10-30", "2026-10-27", True),  # a range that ends on a session
+        ("2026-10-30", "2026-10-28", False),
+    ],
+)
+async def test_the_threshold_counts_sessions_before_the_end_of_the_range(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock, end: str, last_bar: str, stale: bool
+) -> None:
+    clock.advance(days=2)
+    mock_api.add("eod/ACME.US", [bar("2026-10-14"), bar(last_bar)])
+    body = (await call_eod(mcp_client, start="2026-10-14", end=end)).structured_content
+    assert body is not None
+    assert ("STALE_DATA" in codes(body)) is stale
+
+
+# --- get_eod_prices: a session that is not published yet ---------------------------------------------
+
+
+async def test_today_before_its_bar_is_published_is_an_empty_result_that_says_when_it_is_due(
+    mcp_client: Client, mock_api: MockEODHD, deps: Deps
+) -> None:
+    mock_api.add("eod/ACME.US", [])  # 10:00 in New York: the session is open and has no bar yet
+    result = await call_eod(mcp_client, start="2026-11-03", end="2026-11-03")
+    assert not result.is_error
+    body = result.structured_content
+    assert body is not None
+    assert body["data"]["bars"] == []
+    assert (body["data"]["count"], body["data"]["first_date"], body["data"]["last_date"]) == (0, None, None)
+    assert codes(body) == ["EMPTY_RESULT"]
+    empty = warning_of(body, "EMPTY_RESULT")
+    # The bar for Tuesday is expected at 16:30 New York time (EST), which is 21:30 UTC.
+    assert empty["details"] == {
+        "symbol": "ACME.US",
+        "latest_due": "2026-11-02",
+        "next_bar_due": "2026-11-03T21:30:00Z",
+    }
+    assert "no session whose end-of-day bar is due yet" in empty["message"]
+    assert "2026-11-03T21:30:00Z" in empty["message"]
+    assert "weekend" not in empty["message"]
+    assert body["meta"]["cost"] == 1
+    assert deps.ledger.spent_today() == 1
+
+
+async def test_a_clamped_future_end_on_an_unpublished_day_is_the_same_empty_result(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [])
+    result = await call_eod(mcp_client, start="2026-11-03", end="2026-12-31")
+    body = result.structured_content
+    assert body is not None
+    assert codes(body) == ["RANGE_CLAMPED", "EMPTY_RESULT"]
+
+
+async def test_a_range_with_a_session_that_is_due_and_no_bar_is_still_no_data(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [])
+    # Monday 11-02 was published at 16:30 on Monday: its bar should exist, even though Tuesday's does not.
+    text = error_text(await call_eod(mcp_client, start="2026-11-02", end="2026-11-03"))
+    assert "NO_DATA" in text
+    assert "HTTP 200 with no bars" in text
+
+
+async def test_the_unpublished_day_has_a_bar_once_the_publishing_time_has_passed(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    mock_api.add("eod/ACME.US", [])
+    clock.advance(hours=7)  # 22:00 UTC, after the 21:30 publishing time
+    text = error_text(await call_eod(mcp_client, start="2026-11-03", end="2026-11-03"))
+    assert "NO_DATA" in text
+
+
+async def test_a_weekend_only_range_keeps_its_own_explanation(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [])
+    body = (await call_eod(mcp_client, start="2026-10-31", end="2026-11-01")).structured_content
+    assert body is not None
+    message = warning_of(body, "EMPTY_RESULT")["message"]
+    assert "weekend days only" in message
+    assert "due yet" not in message
+
+
+# --- get_eod_prices: how long a recent answer is kept ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("now", "cap_s", "expected"),
+    [
+        (utc(2026, 11, 3, 15, 0), 6 * 3600, 6 * 3600),  # 6.5 h to go: the cap
+        (utc(2026, 11, 3, 19, 0), 6 * 3600, 2.5 * 3600),  # the bar is due at 21:30 UTC
+        (utc(2026, 11, 3, 21, 29), 6 * 3600, 300),  # a minute to go: the floor
+        (utc(2026, 11, 3, 21, 30), 6 * 3600, 6 * 3600),  # due this very second: the next one is a day away
+        (utc(2026, 11, 3, 21, 0), 3600, 1800),  # the health check keeps bars for an hour at most
+        (utc(2026, 11, 3, 15, 0), 3600, 3600),
+        (utc(2026, 11, 7, 12, 0), 6 * 3600, 6 * 3600),  # Saturday: Monday's bar is two days off
+    ],
+)
+def test_recent_bars_are_kept_until_the_next_bar_is_due_within_the_floor_and_the_cap(
+    now: datetime, cap_s: float, expected: float
+) -> None:
+    assert recent_bars_ttl_s("US", now, cap_s=cap_s) == expected
+
+
+async def test_a_recent_answer_does_not_outlive_the_publishing_time(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    clock.advance(hours=4)  # 19:00 UTC: 14:00 in New York, 2.5 hours before Tuesday's bar is due
+    mock_api.add("eod/ACME.US", [bar(day) for day in ("2026-10-30", "2026-11-02")], times=1)
+    mock_api.add("eod/ACME.US", [bar(day) for day in ("2026-10-30", "2026-11-02", "2026-11-03")])
+    first = (await call_eod(mcp_client, start="2026-10-28")).structured_content
+    clock.advance(hours=2, minutes=29)  # 21:29 UTC, a minute before the publishing time
+    cached = (await call_eod(mcp_client, start="2026-10-28")).structured_content
+    clock.advance(hours=1)  # 22:30 UTC
+    later = (await call_eod(mcp_client, start="2026-10-28")).structured_content
+    assert first is not None
+    assert cached is not None
+    assert later is not None
+    assert first["data"]["last_date"] == "2026-11-02"
+    assert cached["meta"]["cached"] is True
+    assert later["meta"]["cached"] is False
+    assert later["data"]["last_date"] == "2026-11-03"
+    assert mock_api.count("eod/") == 2
+
+
+async def test_an_answer_from_the_last_minutes_before_publishing_is_kept_for_five_minutes(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    clock.advance(hours=6, minutes=29)  # 21:29 UTC
+    mock_api.add("eod/ACME.US", [bar("2026-11-02")])
+    await call_eod(mcp_client, start="2026-10-28")
+    clock.advance(minutes=4, seconds=59)
+    await call_eod(mcp_client, start="2026-10-28")
+    assert mock_api.count("eod/") == 1
+    clock.advance(seconds=2)
+    await call_eod(mcp_client, start="2026-10-28")
+    assert mock_api.count("eod/") == 2
+
+
+async def test_a_range_that_ends_well_before_today_keeps_its_day_whatever_the_publishing_time(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock, acme: list[dict[str, Any]]
+) -> None:
+    clock.advance(hours=6, minutes=29)  # a minute before the 21:30 publishing time
+    mock_api.add("eod/ACME.US", between(acme, "2026-10-01", "2026-10-30"))
+    await call_eod(mcp_client, start="2026-10-01", end="2026-10-30")
+    clock.advance(hours=23)
+    await call_eod(mcp_client, start="2026-10-01", end="2026-10-30")
+    assert mock_api.count("eod/") == 1
 
 
 # --- get_eod_prices: spin-offs, currency, truncation ---------------------------------------------------

@@ -3,13 +3,22 @@ from __future__ import annotations
 import io
 import logging
 import sys
+import traceback
 from collections.abc import Iterator
 from urllib.parse import quote, quote_plus
 
 import httpx2
 import pytest
 
-from eodhd_guard_mcp.redact import MASK, MIN_SECRET_LENGTH, RedactingFilter, install_log_redaction, redact
+from eodhd_guard_mcp.redact import (
+    MASK,
+    MIN_SECRET_LENGTH,
+    TEXT_LIMIT,
+    RedactingFilter,
+    clip,
+    install_log_redaction,
+    redact,
+)
 from tests.helpers import TEST_KEY
 
 
@@ -75,6 +84,35 @@ class TestRedact:
         assert redact(f"a {TEST_KEY}", {TEST_KEY}) == f"a {MASK}"
 
 
+class TestClip:
+    def test_the_limit_is_about_two_hundred_characters(self) -> None:
+        assert TEXT_LIMIT == 200
+
+    def test_text_within_the_limit_is_unchanged(self) -> None:
+        assert clip("Acme Corp") == "Acme Corp"
+        assert clip("") == ""
+        assert clip("x" * TEXT_LIMIT) == "x" * TEXT_LIMIT
+
+    def test_longer_text_is_cut_to_the_limit_with_a_visible_ellipsis(self) -> None:
+        cut = clip("x" * (TEXT_LIMIT + 1))
+        assert cut == "x" * (TEXT_LIMIT - 3) + "..."
+        assert len(cut) == TEXT_LIMIT
+
+    def test_a_cut_does_not_leave_a_space_before_the_ellipsis(self) -> None:
+        assert clip("word " * 100, 12) == "word word..."
+
+    def test_the_limit_can_be_given(self) -> None:
+        assert clip("Roche Holding AG", 10) == "Roche H..."
+        assert clip("short", 10) == "short"
+        assert clip("x" * 500, 500) == "x" * 500
+
+    @pytest.mark.parametrize("limit", [0, 1, 2, 3])
+    def test_a_limit_too_small_for_the_ellipsis_still_gives_a_string_that_fits(self, limit: int) -> None:
+        cut = clip("abcdef", limit)
+        assert len(cut) <= max(limit, 3)
+        assert cut.endswith("...")
+
+
 def make_record(msg: object, args: object = None, exc_info: object = None) -> logging.LogRecord:
     return logging.LogRecord("test", logging.INFO, __file__, 1, msg, args, exc_info)  # type: ignore[arg-type]
 
@@ -118,6 +156,32 @@ class TestRedactingFilter:
         assert "ConnectError" in record.exc_text
         assert TEST_KEY not in record.exc_text
         assert TEST_KEY not in logging.Formatter().format(record)
+
+    def test_it_drops_exc_info_once_the_traceback_is_masked_in_exc_text(self) -> None:
+        try:
+            raise httpx2.ConnectError(f"failed: https://eodhd.test/api/x?api_token={TEST_KEY}")
+        except httpx2.ConnectError:
+            record = make_record("request failed", exc_info=sys.exc_info())
+        RedactingFilter([TEST_KEY]).filter(record)
+        assert record.exc_info is None
+        assert record.exc_text is not None
+        assert "ConnectError" in record.exc_text
+        assert TEST_KEY not in record.exc_text
+
+    def test_a_record_that_already_has_exc_text_loses_exc_info_and_is_masked(self) -> None:
+        try:
+            raise RuntimeError(f"key {TEST_KEY}")
+        except RuntimeError:
+            record = make_record("failed", exc_info=sys.exc_info())
+        record.exc_text = f"Traceback: RuntimeError: key {TEST_KEY}"  # cached by an earlier handler
+        RedactingFilter([TEST_KEY]).filter(record)
+        assert record.exc_info is None
+        assert record.exc_text == f"Traceback: RuntimeError: key {MASK}"
+
+    def test_a_record_without_an_exception_is_left_without_one(self) -> None:
+        record = make_record("plain")
+        RedactingFilter([TEST_KEY]).filter(record)
+        assert (record.exc_info, record.exc_text) == (None, None)
 
     def test_it_masks_stack_info(self) -> None:
         record = make_record("here")
@@ -220,6 +284,47 @@ class TestInstall:
         except RuntimeError:
             logging.getLogger("mcp.server").exception("tool failed")
         assert "RuntimeError" in stream.getvalue()
+        assert TEST_KEY not in stream.getvalue()
+
+    def test_a_handler_that_renders_exc_info_itself_cannot_bypass_the_masking(self) -> None:
+        # Rich's handler, with rich tracebacks, builds its output from exc_info and ignores exc_text.
+        class RendersExcInfo(logging.Handler):
+            def __init__(self) -> None:
+                super().__init__()
+                self.output: list[str] = []
+
+            def emit(self, record: logging.LogRecord) -> None:
+                text = record.getMessage()
+                if record.exc_info:
+                    text += "".join(traceback.format_exception(*record.exc_info))
+                self.output.append(text)
+
+        handler = RendersExcInfo()
+        root = logging.getLogger()
+        root.addHandler(handler)
+        try:
+            install_log_redaction(TEST_KEY)
+            try:
+                raise httpx2.ConnectError(f"failed: https://eodhd.test/api/x?api_token={TEST_KEY}")
+            except httpx2.ConnectError:
+                logging.getLogger("mcp.server").exception("tool failed")
+        finally:
+            root.removeHandler(handler)
+        (shown,) = handler.output
+        assert "tool failed" in shown
+        assert TEST_KEY not in shown
+
+    def test_the_standard_formatter_still_prints_the_masked_traceback(
+        self, stream_handler: tuple[logging.Handler, io.StringIO]
+    ) -> None:
+        _, stream = stream_handler
+        install_log_redaction(TEST_KEY)
+        try:
+            raise RuntimeError(f"url was https://eodhd.test/api/x?api_token={TEST_KEY}")
+        except RuntimeError:
+            logging.getLogger("some.module").exception("tool failed")
+        assert "Traceback (most recent call last)" in stream.getvalue()
+        assert "RuntimeError: url was" in stream.getvalue()
         assert TEST_KEY not in stream.getvalue()
 
     def test_installing_twice_keeps_one_filter_that_knows_both_secrets(

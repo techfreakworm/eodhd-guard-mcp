@@ -21,8 +21,15 @@ from eodhd_guard_mcp.costs import cost_for
 from eodhd_guard_mcp.coverage import ensure_covered
 from eodhd_guard_mcp.envelope import ToolResponse, ToolWarning, WarningCode, build_response, iso_utc
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
-from eodhd_guard_mcp.freshness import assess, stale_warning
-from eodhd_guard_mcp.markets import market_for, session_state, sessions_between
+from eodhd_guard_mcp.freshness import Freshness, stale_warning
+from eodhd_guard_mcp.markets import (
+    expected_latest_session,
+    market_for,
+    next_ready_at,
+    session_on_or_before,
+    session_state,
+    sessions_between,
+)
 from eodhd_guard_mcp.semantics import (
     PRICE_BASIS_NOTES,
     Bar,
@@ -57,6 +64,9 @@ MAX_ROWS = 5000
 
 EOD_DEFAULT_DAYS = 30
 EOD_RECENT_TTL_S = 6 * 3600.0
+"""The longest a range that reaches the newest sessions is kept. It is cut short when a bar is due sooner."""
+EOD_RECENT_MIN_TTL_S = 300.0
+"""The shortest it is kept, so a bar that is almost due does not turn into a call on every read."""
 EOD_HISTORIC_TTL_S = 24 * 3600.0
 FRESHNESS_WINDOW_DAYS = 7
 """The stale-data check runs on daily bars whose range ends this close to today."""
@@ -151,6 +161,16 @@ def currency_note(symbols: Sequence[Symbol]) -> ToolWarning | None:
         symbols=lines,
         currency="GBX",
     )
+
+
+def recent_bars_ttl_s(exchange: str, now: datetime, *, cap_s: float) -> float:
+    """How long to keep an answer whose range reaches the newest sessions: until the next bar is due.
+
+    The answer gains a bar when ``next_ready_at`` arrives, so keeping it past that moment would hide the
+    bar. The time is at least ``EOD_RECENT_MIN_TTL_S`` and at most ``cap_s``.
+    """
+    until_due = (next_ready_at(exchange, now) - now).total_seconds()
+    return max(EOD_RECENT_MIN_TTL_S, min(cap_s, until_due))
 
 
 def _truncated_warning(total: int, shown: int, limit: int, oldest: str, noun: str) -> ToolWarning:
@@ -261,6 +281,20 @@ def _no_data_error(
     )
 
 
+def _not_due_warning(symbol: Symbol, start: date, end: date, latest_due: date, now: datetime) -> ToolWarning:
+    """EMPTY_RESULT for a range of sessions whose end-of-day bar EODHD has not had time to publish."""
+    due = iso_utc(next_ready_at(symbol.exchange, now))
+    return ToolWarning.of(
+        WarningCode.EMPTY_RESULT,
+        f"The range {start.isoformat()} to {end.isoformat()} holds no session whose end-of-day bar is due "
+        f"yet: the latest bar expected by now is for {latest_due.isoformat()}, and the next one is expected "
+        f"from {due}. An empty list is the correct answer until then, and no data is missing.",
+        symbol=symbol.full,
+        latest_due=latest_due.isoformat(),
+        next_bar_due=due,
+    )
+
+
 def _freshness_warning(
     symbol: Symbol,
     period: str,
@@ -270,15 +304,34 @@ def _freshness_warning(
     now: datetime,
     threshold: int,
 ) -> ToolWarning | None:
-    """STALE_DATA for daily bars, when the range ends close to today. Filler bars never count as fresh."""
+    """STALE_DATA for daily bars, when the range ends close to today. Filler bars never count as fresh.
+
+    The newest bar is judged against the last session the range can hold: the latest one due by now, or
+    the range's own last session when the range stops earlier. A complete range that ended days ago is
+    therefore not "behind" just because time has passed since it ended.
+    """
     if (
         period != "d"
         or not real_days
         or (now.astimezone(timezone.utc).date() - end).days > FRESHNESS_WINDOW_DAYS
     ):
         return None
-    freshness = assess(symbol.exchange, real_days[-1], now, threshold=threshold)
-    return stale_warning(symbol, freshness) if freshness.stale else None
+    due = expected_latest_session(symbol.exchange, now)
+    reached = session_on_or_before(symbol.exchange, end)
+    expected = min(due, reached)
+    behind = sessions_between(real_days[-1], expected, symbol.exchange)
+    if behind < threshold:
+        return None
+    warning = stale_warning(
+        symbol,
+        Freshness(last_bar=real_days[-1], expected_latest=expected, sessions_behind=behind, stale=True),
+    )
+    if expected == due:
+        return warning
+    ends = f"the range ends on {end.isoformat()}, whose last session is"
+    return warning.model_copy(
+        update={"message": warning.message.replace("the latest session expected by now is", ends, 1)}
+    )
 
 
 async def fetch_eod_prices(
@@ -310,7 +363,10 @@ async def fetch_eod_prices(
             {"from": window.start.isoformat(), "to": window.end.isoformat(), "period": period, "order": "a"},
             endpoint="eod",
             cost=cost_for("eod"),
-            ttl_s=EOD_RECENT_TTL_S if recent else EOD_HISTORIC_TTL_S,
+            ttl_s=(
+                recent_bars_ttl_s(sym.exchange, now, cap_s=EOD_RECENT_TTL_S) if recent else EOD_HISTORIC_TTL_S
+            ),
+            max_age_s=EOD_RECENT_TTL_S if recent else EOD_HISTORIC_TTL_S,
             symbol=sym.full,
         )
     except GuardError as error:  # guard 2
@@ -329,16 +385,22 @@ async def fetch_eod_prices(
         warnings.append(_trimmed_eod_warning(outside, window.start, window.end))
 
     if not inside:  # guard 5
-        if sessions_between(_day_before(window.start), window.end, sym.exchange) >= 1:
+        before_start = _day_before(window.start)
+        latest_due = expected_latest_session(sym.exchange, now)
+        # Only a session whose bar is already due can be missing: today's, before it is published, is not.
+        if sessions_between(before_start, min(window.end, latest_due), sym.exchange) >= 1:
             raise _no_data_error(sym, window.start, window.end, response, outside)
-        warnings.append(
-            ToolWarning.of(
-                WarningCode.EMPTY_RESULT,
-                f"The range {window.start.isoformat()} to {window.end.isoformat()} holds no trading day "
-                "(weekend days only), so an empty list is the correct answer and no data is missing.",
-                symbol=sym.full,
+        if sessions_between(before_start, window.end, sym.exchange) >= 1:
+            warnings.append(_not_due_warning(sym, window.start, window.end, latest_due, now))
+        else:
+            warnings.append(
+                ToolWarning.of(
+                    WarningCode.EMPTY_RESULT,
+                    f"The range {window.start.isoformat()} to {window.end.isoformat()} holds no trading day "
+                    "(weekend days only), so an empty list is the correct answer and no data is missing.",
+                    symbol=sym.full,
+                )
             )
-        )
 
     fillers = [bar for bar in inside if is_filler_bar(bar)]  # guard 6
     kept = inside

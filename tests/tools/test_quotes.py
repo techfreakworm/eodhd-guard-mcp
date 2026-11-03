@@ -270,6 +270,28 @@ async def test_a_quote_needs_a_real_timestamp_and_a_close(
     assert len(warnings_of(body, "NO_QUOTE")) == 1
 
 
+END_OF_TIME = 253402300799  # 9999-12-31T23:59:59Z, the last second a datetime can hold
+
+
+@pytest.mark.parametrize("exchange", ["NSE", "HK", "AU", "SW"])
+async def test_a_timestamp_at_the_end_of_time_is_no_quote_on_a_market_ahead_of_utc(
+    mcp_client: Client, mock_api: MockEODHD, exchange: str
+) -> None:
+    # The same instant in UTC+5:30 is already past year 9999, which no date can hold.
+    mock_api.add("real-time/ACME.US", [row("ACME.US"), row(f"UMB.{exchange}", timestamp=END_OF_TIME)])
+    body = await quoted(mcp_client, ["ACME.US", f"UMB.{exchange}"])
+    assert [e["status"] for e in body["data"]] == ["ok", "no_quote"]
+    assert f"timestamp {END_OF_TIME}" in body["data"][1]["message"]
+    assert len(warnings_of(body, "NO_QUOTE")) == 1
+
+
+async def test_a_lone_timestamp_at_the_end_of_time_fails_as_no_data_not_as_a_crash(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("real-time/UMB.NSE", row("UMB.NSE", timestamp=END_OF_TIME))
+    assert "NO_DATA" in error_text(await quote(mcp_client, ["UMB.NSE"]))
+
+
 async def test_fields_that_are_na_on_their_own_become_null_in_an_otherwise_good_quote(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:

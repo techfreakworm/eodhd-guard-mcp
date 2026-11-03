@@ -6,9 +6,10 @@ no filter, which gives every request for a symbol the same cache entry for 24 ho
 out of it here. Asking again for other sections, statements or periods then costs nothing.
 
 The cutting is the point: officers, addresses and long histories are dropped, statements keep their newest
-periods without the empty fields, and the result stops at about 150 KB. The guards look at what is
-returned: a statement in another currency than the quote, a ``filing_date`` that is only the period end,
-a dividend yield of 0 next to a forward dividend, and EPS on the analyst basis.
+periods without the empty fields, the vendor's free text is cut to 200 characters, and the result stops at
+150 KB of the indented JSON that is sent. The guards look at what is returned: a statement in another
+currency than the quote, a ``filing_date`` that is only the period end, a dividend yield of 0 next to a
+forward dividend, and EPS on the analyst basis.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from eodhd_guard_mcp.costs import cost_for
 from eodhd_guard_mcp.coverage import ensure_covered
 from eodhd_guard_mcp.envelope import ToolResponse, ToolWarning, WarningCode, build_response
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.tools import READ_ONLY, guarded
 from eodhd_guard_mcp.validation import Symbol, check_int, parse_symbol
 
@@ -43,7 +45,12 @@ def _fold(name: str) -> str:
 
 CACHE_TTL_S = 24 * 3600.0
 OUTPUT_CAP_BYTES = 150_000
+"""The most that ``data`` may take as the indented JSON the SDK sends, which is what the model reads."""
 DESCRIPTION_CHARS = 500
+CURRENCY_CHARS = 12
+"""A currency the vendor gave is cut to this length where a sentence names it; the details keep it whole."""
+SERIES_DEPTH = 3
+"""Every list the cap cuts sits three levels down: ``data``, ``sections`` or ``statements``, a name."""
 TOP_HOLDERS = 10
 RECENT_INSIDER_TRANSACTIONS = 10
 DIVIDEND_YEARS = 5
@@ -88,16 +95,32 @@ _SECTION_NAMES = {_fold(name): name for name in SECTIONS}
 _SECTIONS_ACCEPTED = ", ".join(SECTIONS)
 _STATEMENTS_ACCEPTED = "income, balance, cashflow"
 
-DESCRIPTION = (
-    "Company fundamentals for a stock, ETF or fund, cut down to a small answer. The first read of a symbol "
-    "costs 10 API calls and fetches EODHD's whole document, which is cached for 24 hours, so reading other "
-    "sections, statements, periods or the yearly view of the same symbol afterwards costs 0. Stocks return "
-    "General, Highlights, Valuation, SharesStats, SplitsDividends and Earnings by default (ETFs: General, "
-    "Technicals, ETF_Data; funds: General, MutualFund_Data); add income, balance and cashflow statements "
-    "with `statements`. It warns when statements are in another currency than the quote (London lines are "
-    "quoted in pence), when filing_date is only the period end, when a dividend yield of 0 sits next to a "
-    "forward dividend, and that EPS actuals use the analyst basis."
-)
+
+def _description(cache_enabled: bool) -> str:
+    """The tool description. What a second read costs depends on whether the document is cached."""
+    cost = cost_for("fundamentals")
+    reads = (
+        f"The first read of a symbol costs {cost} API calls and fetches EODHD's whole document, which is "
+        "cached for 24 hours, so reading other sections, statements, periods or the yearly view of the "
+        "same symbol afterwards costs 0. "
+        if cache_enabled
+        else f"Every read of a symbol costs {cost} API calls and fetches EODHD's whole document; the cache "
+        "is off, so reading other sections, statements, periods or the yearly view of the same symbol "
+        f"costs {cost} again. "
+    )
+    return (
+        "Company fundamentals for a stock, ETF or fund, cut down to a small answer. "
+        + reads
+        + "Stocks return General, Highlights, Valuation, SharesStats, SplitsDividends and Earnings by "
+        "default (ETFs: General, Technicals, ETF_Data; funds: General, MutualFund_Data); add income, "
+        "balance and cashflow statements with `statements`. It warns when statements are in another "
+        "currency than the quote (London lines are quoted in pence), when filing_date is only the period "
+        "end, when a dividend yield of 0 sits next to a forward dividend, and that EPS actuals use the "
+        "analyst basis."
+    )
+
+
+DESCRIPTION = _description(True)
 
 
 def _invalid(
@@ -187,23 +210,64 @@ def _blank(value: object) -> bool:
 
 
 def _text(value: object) -> str | None:
-    """A non-blank string, stripped; anything else is None."""
+    """A non-blank string, stripped and cut to ``TEXT_LIMIT`` characters; anything else is None."""
     if isinstance(value, str) and not _blank(value):
-        return value.strip()
+        return clip(value.strip())
     return None
 
 
 def _number(value: object) -> float | None:
-    """A finite number from a JSON value; strings and booleans are not numbers here."""
+    """A finite number from a JSON number; strings and booleans are not numbers here.
+
+    An integer too large for a float is not a number either.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 
+def _clip_all(value: Any) -> Any:
+    """``value`` with every string cut to ``TEXT_LIMIT`` characters, and a ``Description`` to its own limit.
+
+    Names, holders, insiders and the text fields of an ETF come from the vendor; none of them may grow
+    into a message of its own.
+    """
+    if isinstance(value, str):
+        return clip(value)
+    if isinstance(value, list):
+        return [_clip_all(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            name: clip(item, DESCRIPTION_CHARS)
+            if name == "Description" and isinstance(item, str)
+            else _clip_all(item)
+            for name, item in value.items()
+        }
+    return value
+
+
+def _dumped(value: object) -> str:
+    """The text the SDK sends for ``value``: JSON indented by two spaces, as ``pydantic_core`` writes it."""
+    return json.dumps(value, indent=2, ensure_ascii=False, default=str)
+
+
 def _json_size(value: object) -> int:
-    """Bytes of the compact UTF-8 JSON for ``value``, which is what the model is charged for."""
-    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    """Bytes of the indented UTF-8 JSON for ``value``, which is what the model reads."""
+    return len(_dumped(value).encode("utf-8"))
+
+
+def _entry_weight(entry: object, depth: int) -> int:
+    """Bytes that dropping the last entry of a list ``depth`` levels down takes off the indented JSON.
+
+    That is the entry itself, the comma and line break that set it apart from the one before, and the indent
+    in front of each of its lines: two spaces for each level of the list, plus one for its own.
+    """
+    text = _dumped(entry)
+    return len(text.encode("utf-8")) + 2 + (text.count("\n") + 1) * 2 * (depth + 1)
 
 
 def _index_ordered(value: Any) -> list[Any]:
@@ -332,7 +396,8 @@ def _trim_holdings(section: str, value: Any, ctx: _Context) -> dict[str, Any]:
     """``ETF_Data`` and ``MutualFund_Data`` without ``Holdings``: a full position list can be thousands."""
     out = dict(_mapping(value))
     if "Holdings" in out:
-        count = len(out.pop("Holdings") or ())
+        holdings = out.pop("Holdings")
+        count = len(holdings) if isinstance(holdings, (list, dict)) else 0
         ctx.trims.append(f"{section}.Holdings ({count} positions) dropped, the top holdings stay")
     return out
 
@@ -420,20 +485,20 @@ def _omit_sections(data: dict[str, Any], cap: int) -> list[str]:
     return omitted
 
 
-def _enforce_cap(data: dict[str, Any], cap: int) -> ToolWarning | None:
-    """Make ``data`` fit in ``cap`` bytes: oldest periods go first, whole sections only as a last resort.
+def _enforce_cap(data: dict[str, Any], cap: int, *, cache_enabled: bool = True) -> ToolWarning | None:
+    """Make ``data`` fit in ``cap`` bytes of indented JSON: oldest periods go first, whole sections last.
 
     Each round drops the oldest entry of the largest list, so no series is emptied while a larger one can
-    still give. Entry sizes are measured once and then subtracted, which is exact because a list never
-    drops to empty, so a large document is not serialised over and over. Returns the TRUNCATED warning,
-    or None when nothing had to go.
+    still give. Entry weights (see ``_entry_weight``) are measured once and then subtracted, which is
+    exact because a list never drops to empty, so a large document is not serialised over and over, and
+    serialising with an indent is slow. Returns the TRUNCATED warning, or None when nothing had to go.
     """
     before = _json_size(data)
     if before <= cap:
         return None
     series = _series(data)
     original = {label: len(rows) for label, rows in series}
-    weights = {label: [_json_size(row) + 1 for row in rows] for label, rows in series}
+    weights = {label: [_entry_weight(row, SERIES_DEPTH) for row in rows] for label, rows in series}
     total = before
     while total > cap:
         candidates = [(label, rows) for label, rows in series if len(rows) > 1]
@@ -456,12 +521,17 @@ def _enforce_cap(data: dict[str, Any], cap: int) -> ToolWarning | None:
         )
     if omitted:
         parts.append("Whole sections were dropped (" + ", ".join(omitted) + ").")
+    again = (
+        "the document stays cached for 24 hours, so that costs nothing."
+        if cache_enabled
+        else f"the cache is off, so another read costs {cost_for('fundamentals')} API calls."
+    )
     return ToolWarning.of(
         WarningCode.TRUNCATED,
         f"The answer was {before // 1000} KB, over the {cap // 1000} KB cap. "
         + (" ".join(parts) if parts else "Nothing more could be cut.")
         + " Ask again for fewer `statements` or `sections`, or a smaller `periods`, to keep more of each: "
-        "the document stays cached for 24 hours, so that costs nothing.",
+        + again,
         limit_bytes=cap,
         size_before=before,
         size_after=_json_size(data),
@@ -490,7 +560,11 @@ def _currency_warning(quote: str | None, statements: Mapping[str, Any]) -> ToolW
     }
     if not differing:
         return None
-    listing = "; ".join(f"{short}: {', '.join(used)}" for short, used in differing.items())
+    # Currencies are the vendor's text. The sentence names them short; the details hold them whole.
+    listing = "; ".join(
+        f"{short}: {', '.join(clip(currency, CURRENCY_CHARS) for currency in used)}"
+        for short, used in differing.items()
+    )
     pence = (
         " GBX is pence, so a figure in GBP differs from a price in GBX by a factor of 100."
         if quote.upper() == "GBX"
@@ -499,8 +573,9 @@ def _currency_warning(quote: str | None, statements: Mapping[str, Any]) -> ToolW
     mixed = any(len(used) > 1 for used in differing.values())
     return ToolWarning.of(
         WarningCode.CURRENCY_MISMATCH,
-        f"The line is quoted in {quote}, but the statements are reported in a different currency "
-        f"({listing}){' and one statement mixes currencies across periods' if mixed else ''}. "
+        f"The line is quoted in {clip(quote, CURRENCY_CHARS)}, but the statements are reported in a "
+        f"different currency ({listing})"
+        f"{' and one statement mixes currencies across periods' if mixed else ''}. "
         "Do not combine a price with statement figures (P/E, yield, market value) without converting "
         f"first.{pence}",
         quote_currency=quote,
@@ -572,17 +647,20 @@ def _kind(doc: Mapping[str, Any]) -> Kind:
     return "fund" if "MutualFund_Data" in doc else "stock"
 
 
-def _document(data: Any, symbol: Symbol, cost: int) -> dict[str, Any]:
+def _document(data: Any, symbol: Symbol, cost: int, *, cache_enabled: bool = True) -> dict[str, Any]:
     """The company document, or the error for an answer that is empty or not a document."""
     if isinstance(data, dict) and data:
         return data
     if isinstance(data, (dict, list)) and not data:
-        billing = (
-            f"The request was billed ({cost} calls) and the empty answer is cached for 24 hours."
-            if cost
-            else "This empty answer comes from the cache, where an earlier billed request left it; it is "
-            "fetched again 24 hours after that."
-        )
+        if not cost:
+            billing = (
+                "This empty answer comes from the cache, where an earlier billed request left it; it is "
+                "fetched again 24 hours after that."
+            )
+        elif cache_enabled:
+            billing = f"The request was billed ({cost} calls) and the empty answer is cached for 24 hours."
+        else:
+            billing = f"The request was billed ({cost} calls) and the empty answer is not cached."
         raise GuardError(
             ErrorCode.NO_DATA,
             f"{symbol.full}: EODHD answered HTTP 200 with an empty document, not an error. The code may be "
@@ -614,8 +692,13 @@ def build_fundamentals(
     statements: Sequence[str],
     period: str,
     periods: int,
+    *,
+    cache_enabled: bool = True,
 ) -> Built:
-    """Cut the requested sections and statements out of ``doc`` and run the guards on what is returned."""
+    """Cut the requested sections and statements out of ``doc`` and run the guards on what is returned.
+
+    ``cache_enabled`` only changes what the cap warning says about asking again.
+    """
     kind = _kind(doc)
     general = _mapping(doc.get("General"))
     ctx = _Context(periods=periods)
@@ -628,7 +711,7 @@ def build_fundamentals(
     returned: dict[str, Any] = {}
     for name in chosen:
         trimmer = _TRIMMERS.get(name)
-        returned[name] = trimmer(doc[name], ctx) if trimmer is not None else doc[name]
+        returned[name] = _clip_all(trimmer(doc[name], ctx) if trimmer is not None else doc[name])
 
     financials = _mapping(doc.get("Financials"))
     built_statements: dict[str, Any] = {}
@@ -638,12 +721,12 @@ def build_fundamentals(
         if statement is None:
             missing_statements.append(short)
         else:
-            built_statements[short] = statement
+            built_statements[short] = _clip_all(statement)
 
     data: dict[str, Any] = {
         "symbol": symbol.full,
-        "name": general.get("Name"),
-        "type": general.get("Type"),
+        "name": _clip_all(general.get("Name")),
+        "type": _clip_all(general.get("Type")),
         "quote_currency": _text(general.get("CurrencyCode")),
         "updated_at": _text(general.get("UpdatedAt")),
         "sections": returned,
@@ -659,7 +742,7 @@ def build_fundamentals(
         }
 
     warnings: list[ToolWarning] = []
-    truncated = _enforce_cap(data, OUTPUT_CAP_BYTES)
+    truncated = _enforce_cap(data, OUTPUT_CAP_BYTES, cache_enabled=cache_enabled)
     if truncated is not None:
         warnings.append(truncated)
     final_statements = _mapping(data.get("statements"))
@@ -751,19 +834,27 @@ async def fundamentals(
             f"sections from {_SECTIONS_ACCEPTED}; or statements from {_STATEMENTS_ACCEPTED}",
             hint="Leave sections out to get the defaults for the instrument.",
         )
+    cache_enabled = deps.settings.cache_enabled
     response = await _fetch(deps, symbol)
-    doc = _document(response.data, symbol, response.cost)
-    built = build_fundamentals(doc, symbol, wanted_sections, wanted_statements, period, count)
+    doc = _document(response.data, symbol, response.cost, cache_enabled=cache_enabled)
+    built = build_fundamentals(
+        doc, symbol, wanted_sections, wanted_statements, period, count, cache_enabled=cache_enabled
+    )
     if response.cached:
         cache_note = (
             "Served from the local cache. Other sections, statements, periods or the yearly view of this "
             "symbol cost 0 until the cached document expires, 24 hours after the first fetch (see "
             "meta.fetched_at)."
         )
-    else:
+    elif cache_enabled:
         cache_note = (
             f"The whole document was fetched once ({response.cost} calls) and is cached for 24 hours. Other "
             "sections, statements, periods or the yearly view of this symbol cost 0 until then."
+        )
+    else:
+        cache_note = (
+            f"The whole document was fetched ({response.cost} calls) and is not cached: every read of this "
+            f"symbol costs {response.cost} calls, whichever sections, statements or periods it asks for."
         )
     notes = [cache_note, *built.notes]
     return build_response(built.data, [response], warnings=built.warnings, notes=notes)
@@ -775,7 +866,7 @@ def register(server: MCPServer, deps: Deps) -> None:
     @server.tool(
         name="get_fundamentals",
         title="Company fundamentals",
-        description=DESCRIPTION,
+        description=_description(deps.settings.cache_enabled),
         annotations=READ_ONLY,
     )
     @guarded(deps)

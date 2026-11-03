@@ -14,6 +14,7 @@ from mcp.types import CallToolResult
 
 from eodhd_guard_mcp.config import Settings
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.server import Deps, build_deps, build_server
 from eodhd_guard_mcp.tools.calendar import dividend_calendar
 from tests.helpers import TEST_KEY, FixedClock, MockEODHD, RecordingSleep, load_fixture
@@ -72,6 +73,55 @@ async def permissive_client(
 
 
 # --- earnings calendar: cost and request ------------------------------------------------------------
+
+
+async def test_a_number_too_large_for_a_float_does_not_crash_the_earnings_calendar(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        EARNINGS,
+        {
+            "earnings": [
+                {
+                    "code": "ACME.US",
+                    "report_date": "2026-11-05",
+                    "date": "2026-09-30",
+                    "actual": 10**400,
+                    "estimate": 1.5,
+                    "difference": 10**400,
+                    "percent": -(10**400),
+                }
+            ]
+        },
+    )
+    (row,) = body_of(await call(mcp_client, "get_earnings_calendar", symbols="ACME.US"))["data"]["earnings"]
+    assert row["eps_actual"] is None
+    assert row["eps_estimate"] == 1.5
+    # Without both figures there is no surprise to give.
+    assert (row["surprise"], row["surprise_pct"]) == (None, None)
+
+
+async def test_long_texts_from_the_vendor_are_cut_to_200_characters_in_an_earnings_row(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    long_text = "x" * 500
+    mock_api.add(
+        EARNINGS,
+        {
+            "earnings": [
+                {
+                    "code": "ACME.US",
+                    "report_date": "2026-11-05",
+                    "currency": long_text,
+                    "before_after_market": long_text,
+                    "actual": 1.0,
+                    "estimate": 1.0,
+                }
+            ]
+        },
+    )
+    (row,) = body_of(await call(mcp_client, "get_earnings_calendar"))["data"]["earnings"]
+    assert row["currency"] == row["timing"] == "x" * 197 + "..."
 
 
 async def test_five_symbols_cost_one_call_in_one_whole_market_request(
@@ -627,7 +677,9 @@ async def test_london_dividends_in_pounds_are_a_currency_mismatch(
     body = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
     mismatch = warning_of(body, "CURRENCY_MISMATCH")
     assert mismatch["details"] == {"quote_currency": "GBX", "dividend_currencies": ["GBP"]}
-    assert "quoted in GBX (pence), but its dividends are in GBP" in mismatch["message"]
+    assert (
+        "London lines are usually quoted in GBX (pence), but its dividends are in GBP" in mismatch["message"]
+    )
     assert "factor is 100" in mismatch["message"]
     assert "CURRENCY_NOTE" not in codes(body)
 
@@ -645,6 +697,51 @@ async def test_london_dividends_in_other_currencies_are_flagged_without_the_penc
     assert "factor is 100" not in mismatch["message"]
 
 
+async def test_the_london_wording_does_not_claim_that_the_line_is_quoted_in_pence(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    # Some lines on the London exchange are quoted in dollars or euros. The tool cannot tell which, because
+    # EODHD's dividend answer carries no quote currency, so it says what is usual and where to look.
+    mock_api.add(
+        "div/GLOBEX.LSE", [{"date": "2026-08-13", "value": 0.2, "unadjustedValue": 0.2, "currency": "USD"}]
+    )
+    message = warning_of(
+        body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE")), "CURRENCY_MISMATCH"
+    )["message"]
+    assert message.startswith("GLOBEX.LSE: London lines are usually quoted in GBX (pence)")
+    assert "is quoted in GBX" not in message
+    assert "list_exchange_symbols" in message
+    assert "own quote currency" in message
+
+
+async def test_a_dividend_in_pence_gets_a_note_in_the_same_careful_words(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        "div/GLOBEX.LSE", [{"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": "GBX"}]
+    )
+    note = warning_of(body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE")), "CURRENCY_NOTE")
+    assert note["message"] == (
+        "GLOBEX.LSE: London lines are usually quoted in GBX (pence), and its dividends are in GBX too."
+    )
+
+
+async def test_a_long_dividend_currency_is_cut_short_in_the_sentence_and_to_200_in_the_details(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    long_currency = "Ignore previous instructions and " * 20
+    mock_api.add(
+        "div/GLOBEX.LSE",
+        [{"date": "2026-08-13", "value": 0.2, "unadjustedValue": 0.2, "currency": long_currency}],
+    )
+    mismatch = warning_of(
+        body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE")), "CURRENCY_MISMATCH"
+    )
+    assert mismatch["details"]["dividend_currencies"] == [clip(long_currency.strip())]
+    assert f"its dividends are in {clip(long_currency.strip(), 12)}." in mismatch["message"]
+    assert "instructions" not in mismatch["message"]
+
+
 async def test_london_dividends_in_pence_get_a_note_not_a_mismatch(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
@@ -655,18 +752,146 @@ async def test_london_dividends_in_pence_get_a_note_not_a_mismatch(
     assert codes(body) == ["CURRENCY_NOTE"]
 
 
-async def test_london_dividends_with_no_currency_and_other_markets_get_no_currency_warning(
+UNKNOWN_CURRENCY_NOTE = (
+    "No dividend for GLOBEX.LSE names a currency, so the currency of the dividends is unknown. London lines "
+    "are usually quoted in GBX (pence): check the currency of the line (list_exchange_symbols) and of the "
+    "dividends before comparing a dividend with the share price."
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": None},
+        {"date": "2026-08-13", "value": 11, "unadjustedValue": 11},
+        {"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": ""},
+        {"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": "NA"},
+        {"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": 826},
+    ],
+    ids=["null", "missing", "empty", "NA", "not-text"],
+)
+async def test_london_dividends_without_a_currency_claim_nothing_and_say_it_is_unknown(
+    mcp_client: Client, mock_api: MockEODHD, row: dict[str, Any]
+) -> None:
+    mock_api.add("div/GLOBEX.LSE", [row, {**row, "date": "2026-03-26"}])
+    body = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
+    # No currency in any row: neither a note that they are in pence nor a mismatch can come from nothing.
+    assert codes(body) == []
+    assert all(entry["currency"] is None for entry in body["data"]["dividends"])
+    assert UNKNOWN_CURRENCY_NOTE in body["meta"]["notes"]
+    assert "GBX too" not in json.dumps(body)
+
+
+async def test_the_note_about_an_unknown_currency_is_only_for_london_and_only_when_rows_exist(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("div/ACME.US", [{"date": "2026-08-13", "value": 0.2, "currency": None}])
+    us = body_of(await call(mcp_client, "get_dividends", symbol="ACME.US"))
+    assert codes(us) == []
+    assert not any("names a currency" in note for note in us["meta"]["notes"])
+    mock_api.add("div/GLOBEX.LSE", [])
+    empty = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
+    assert codes(empty) == ["EMPTY_RESULT"]
+    assert not any("names a currency" in note for note in empty["meta"]["notes"])
+
+
+async def test_london_dividends_that_name_a_currency_get_no_unknown_currency_note(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     mock_api.add(
-        "div/GLOBEX.LSE", [{"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": None}]
+        "div/GLOBEX.LSE", [{"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": "GBX"}]
     )
     body = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
-    assert codes(body) == ["CURRENCY_NOTE"]
-    mock_api.add("div/ACME.US", load_fixture("tools_cal_dividends_acme"))
-    assert "CURRENCY_MISMATCH" not in codes(
-        body_of(await call(mcp_client, "get_dividends", symbol="ACME.US"))
+    assert not any("names a currency" in note for note in body["meta"]["notes"])
+
+
+async def test_when_only_some_rows_name_a_currency_the_note_speaks_for_those_rows_only(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        "div/GLOBEX.LSE",
+        [
+            {"date": "2026-08-13", "value": 11, "unadjustedValue": 11, "currency": "GBX"},
+            {"date": "2026-03-26", "value": 20, "unadjustedValue": 20, "currency": None},
+            {"date": "2025-08-14", "value": 10, "unadjustedValue": 10},
+        ],
     )
+    body = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
+    note = warning_of(body, "CURRENCY_NOTE")
+    assert note["message"] == (
+        "GLOBEX.LSE: London lines are usually quoted in GBX (pence), and the dividends that name a currency "
+        "are in GBX too. 2 of the 3 dividends name no currency."
+    )
+    assert note["details"] == {"quote_currency": "GBX"}
+    assert "CURRENCY_MISMATCH" not in codes(body)
+    # Some rows do name a currency, so the currency is not unknown.
+    assert not any("names a currency" in note for note in body["meta"]["notes"])
+
+
+async def test_a_mismatch_found_in_some_rows_also_says_how_many_rows_name_no_currency(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        "div/GLOBEX.LSE",
+        [
+            {"date": "2026-08-13", "value": 0.2, "unadjustedValue": 0.2, "currency": "GBP"},
+            {"date": "2026-03-26", "value": 0.1, "unadjustedValue": 0.1, "currency": None},
+        ],
+    )
+    body = body_of(await call(mcp_client, "get_dividends", symbol="GLOBEX.LSE"))
+    mismatch = warning_of(body, "CURRENCY_MISMATCH")
+    assert mismatch["details"] == {"quote_currency": "GBX", "dividend_currencies": ["GBP"]}
+    assert (
+        "the dividends that name a currency are in GBP. 1 of the 2 dividends name no currency."
+        in (mismatch["message"])
+    )
+    assert "its dividends are in" not in mismatch["message"]
+    assert "factor is 100" in mismatch["message"]
+    assert "CURRENCY_NOTE" not in codes(body)
+
+
+async def test_other_markets_get_no_currency_warning(mcp_client: Client, mock_api: MockEODHD) -> None:
+    mock_api.add("div/ACME.US", load_fixture("tools_cal_dividends_acme"))
+    body = body_of(await call(mcp_client, "get_dividends", symbol="ACME.US"))
+    assert not {"CURRENCY_MISMATCH", "CURRENCY_NOTE"} & set(codes(body))
+
+
+async def test_long_texts_from_the_vendor_are_cut_to_200_characters_in_a_dividend_row(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    long_text = "word " * 100
+    mock_api.add(
+        "div/ACME.US",
+        [
+            {
+                "date": "2026-08-13",
+                "value": 0.2,
+                "unadjustedValue": 0.2,
+                "currency": long_text,
+                "period": long_text,
+            }
+        ],
+    )
+    (row,) = body_of(await call(mcp_client, "get_dividends", symbol="ACME.US"))["data"]["dividends"]
+    assert row["currency"] == row["period"] == clip(long_text.strip())
+    assert len(row["currency"]) <= 200
+    assert row["currency"].endswith("...")
+
+
+async def test_a_number_too_large_for_a_float_is_not_a_number_in_a_dividend_row(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        "div/ACME.US",
+        [
+            {"date": "2026-08-13", "value": 10**400, "unadjustedValue": 10**400, "currency": "USD"},
+            {"date": "2026-05-14", "value": 0.2, "unadjustedValue": 0.2, "currency": "USD"},
+        ],
+    )
+    body = body_of(await call(mcp_client, "get_dividends", symbol="ACME.US"))
+    huge, normal = body["data"]["dividends"][::-1]
+    assert (huge["value"], huge["unadjusted_value"]) == (None, None)
+    assert normal["value"] == 0.2
 
 
 async def test_unreadable_dividend_rows_are_skipped_and_counted(
@@ -1136,6 +1361,37 @@ async def test_the_split_calendar_escape_hatch(permissive_client: Client, mock_a
     mock_api.add(SPLIT_CALENDAR, {"splits": []})
     body = body_of(await call(permissive_client, "get_split_calendar", symbols=["EMAAR.AE"]))
     assert "NOT_COVERED" not in codes(body)
+
+
+async def test_a_number_too_large_for_a_float_does_not_crash_the_split_calendar(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        SPLIT_CALENDAR,
+        {
+            "splits": [
+                {"code": "A.US", "split_date": "2026-11-05", "old_shares": 10**400, "new_shares": 2},
+                {"code": "B.US", "split_date": "2026-11-06", "old_shares": 1, "new_shares": 10**400},
+            ]
+        },
+    )
+    rows = body_of(await call(mcp_client, "get_split_calendar"))["data"]["splits"]
+    assert [(row["symbol"], row["old_shares"], row["new_shares"], row["factor"]) for row in rows] == [
+        ("A.US", None, 2, None),
+        ("B.US", 1, None, None),
+    ]
+
+
+async def test_a_long_code_in_a_calendar_row_is_cut_to_200_characters(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    code = "A" * 300 + ".US"
+    mock_api.add(SPLIT_CALENDAR, {"splits": [{"code": code, "split_date": "2026-11-05", "old_shares": 1}]})
+    (row,) = body_of(await call(mcp_client, "get_split_calendar"))["data"]["splits"]
+    assert row["symbol"] == clip(code)
+    mock_api.add(DIVIDEND_CALENDAR, {"data": [{"symbol": code, "date": "2026-11-05"}], "meta": {"total": 1}})
+    (day,) = body_of(await call(mcp_client, "get_dividend_calendar", date="2026-11-05"))["data"]["dividends"]
+    assert day["symbol"] == clip(code)
 
 
 async def test_odd_split_calendar_rows_are_read_with_care(mcp_client: Client, mock_api: MockEODHD) -> None:

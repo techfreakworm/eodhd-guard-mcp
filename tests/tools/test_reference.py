@@ -13,6 +13,7 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from eodhd_guard_mcp.config import Settings
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.server import build_deps, build_server
 from tests.helpers import TEST_KEY, FixedClock, MockEODHD, RecordingSleep, load_fixture
 
@@ -68,6 +69,10 @@ async def client_with(
 
 def add_us_list(mock_api: MockEODHD) -> None:
     mock_api.add(US_SYMBOLS, load_fixture("tools_ref_symbols_us"))
+
+
+LONG = "Acme Industrial Holdings " * 30
+CUT = clip(LONG.strip())
 
 
 # --- list_exchanges -----------------------------------------------------------------------------------
@@ -145,6 +150,19 @@ async def test_a_query_without_a_match_is_an_empty_result_not_an_error(
     assert "'narnia'" in warning(body, "EMPTY_RESULT")["message"]
 
 
+async def test_long_texts_from_the_vendor_are_cut_to_200_characters_in_the_exchange_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    assert len(CUT) == 200
+    assert CUT.endswith("...")
+    mock_api.add(
+        "exchanges-list",
+        [{"Code": "ACX", "Name": LONG, "Country": LONG, "Currency": LONG, "OperatingMIC": LONG}],
+    )
+    (row,) = ok(await call(mcp_client, "list_exchanges"))["data"]["exchanges"]
+    assert (row["name"], row["country"], row["currency"], row["operating_mic"]) == (CUT,) * 4
+
+
 async def test_the_exchange_list_is_cached_for_a_week(
     mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
 ) -> None:
@@ -199,6 +217,17 @@ async def test_a_symbol_is_built_from_the_requested_exchange_and_keeps_the_venue
     assert request.path == US_SYMBOLS
     assert "delisted" not in request.params
     assert body["meta"]["endpoints"] == ["exchange-symbol-list"]
+
+
+async def test_long_texts_from_the_vendor_are_cut_to_200_characters_in_the_symbol_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        US_SYMBOLS,
+        [{"Code": "ACME", "Name": LONG, "Country": LONG, "Currency": LONG, "Type": LONG, "Isin": LONG}],
+    )
+    (row,) = ok(await call(mcp_client, "list_exchange_symbols", exchange="US"))["data"]["symbols"]
+    assert (row["name"], row["country"], row["currency"], row["type"], row["isin"]) == (CUT,) * 5
 
 
 @pytest.mark.parametrize("wanted", ["Common Stock", "common_stock", "COMMON-STOCK", "  common   stock "])
@@ -264,6 +293,25 @@ async def test_pages_of_one_list_cost_one_call_in_total(mcp_client: Client, mock
     assert mock_api.count(US_SYMBOLS) == 1
 
 
+async def test_with_the_cache_off_the_note_does_not_promise_free_pages(
+    settings: Settings,
+    mock_api: MockEODHD,
+    clock: FixedClock,
+    sleeps: RecordingSleep,
+    isolated_logging: None,
+) -> None:
+    add_us_list(mock_api)
+    async with client_with(replace(settings, cache_enabled=False), mock_api, clock, sleeps) as client:
+        first = ok(await call(client, "list_exchange_symbols", exchange="US", max_rows=12))
+        second = ok(await call(client, "list_exchange_symbols", exchange="US", max_rows=12, offset=12))
+    assert (first["meta"]["cost"], second["meta"]["cost"]) == (1, 1)
+    note = first["meta"]["notes"][0]
+    assert "cache is off" in note
+    assert "1 API call" in note
+    assert "cost 0" not in note
+    assert mock_api.count(US_SYMBOLS) == 2
+
+
 async def test_filters_on_a_cached_list_cost_nothing_either(mcp_client: Client, mock_api: MockEODHD) -> None:
     add_us_list(mock_api)
     ok(await call(mcp_client, "list_exchange_symbols", exchange="US"))
@@ -294,6 +342,26 @@ async def test_a_wrong_type_word_gets_the_types_the_list_has(mcp_client: Client,
     assert "type 'stock'" in message
     assert "common_stock (21)" in message
     assert "etf (4)" in message
+
+
+async def test_the_types_named_in_a_warning_are_cut_short_but_kept_whole_in_the_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    long_type = "weird " * 20
+    mock_api.add(
+        US_SYMBOLS,
+        [
+            {"Code": "ACME", "Name": "Acme", "Type": long_type},
+            {"Code": "GLBE", "Name": "Globex", "Type": "ETF"},
+        ],
+    )
+    body = ok(await call(mcp_client, "list_exchange_symbols", exchange="US", type="stock"))
+    message = warning(body, "EMPTY_RESULT")["message"]
+    assert "etf (1)" in message
+    assert f"{clip('_'.join(long_type.split()), 30)} (1)" in message
+    assert "_".join(long_type.split()) not in message
+    whole = ok(await call(mcp_client, "list_exchange_symbols", exchange="US"))["data"]["symbols"]
+    assert whole[0]["type"] == long_type.strip()
 
 
 async def test_a_query_without_a_match_says_how_big_the_list_is(
@@ -438,6 +506,53 @@ async def test_search_rows_carry_the_symbol_the_previous_close_and_a_liveness_fl
     assert body["data"]["query"] == "Acme Corp"
     assert body["meta"]["cost"] == 1
     assert body["meta"]["endpoints"] == ["search"]
+
+
+async def test_long_texts_from_the_vendor_are_cut_to_200_characters_in_search_results(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add(
+        "search/Acme Corp",
+        [
+            {
+                "Code": "ACME",
+                "Exchange": "US",
+                "Name": LONG,
+                "Type": LONG,
+                "Country": LONG,
+                "Currency": LONG,
+                "ISIN": LONG,
+                "isPrimary": True,
+                "previousClose": 41.8,
+                "previousCloseDate": "2026-11-02",
+            }
+        ],
+    )
+    (row,) = ok(await call(mcp_client, "search_symbols", query="Acme Corp"))["data"]["results"]
+    assert (row["name"], row["type"], row["country"], row["currency"], row["isin"]) == (CUT,) * 5
+
+
+async def test_symbols_named_in_a_warning_are_cut_short_but_kept_whole_in_its_details(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    code = "OLD" + "Z" * 100
+    mock_api.add(
+        "search/Acme Corp",
+        [
+            {
+                "Code": code,
+                "Exchange": "US",
+                "Name": "Acme",
+                "previousClose": 1.0,
+                "previousCloseDate": "2026-01-02",
+            }
+        ],
+    )
+    body = ok(await call(mcp_client, "search_symbols", query="Acme Corp"))
+    inactive = warning(body, "POSSIBLY_INACTIVE")
+    assert inactive["details"]["symbols"] == [f"{code}.US"[:200]]
+    assert f"No recent previous close for {clip(f'{code}.US', 24)}:" in inactive["message"]
+    assert code not in inactive["message"]
 
 
 async def test_a_missing_or_old_previous_close_marks_the_line_as_possibly_inactive(

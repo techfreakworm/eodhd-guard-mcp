@@ -1,7 +1,8 @@
 """A small on-disk cache of EODHD answers, so repeating a question costs nothing.
 
-The cache key is a hash of the request path and its parameters without the API key, and the stored body
-is the response as EODHD sent it. The key is never written here.
+The cache key is a hash of the server, a fingerprint of the API key, the request path and its parameters
+without the key, and the stored body is the response as EODHD sent it. The API key is never written here:
+the fingerprint is a few digits of its SHA-256, and it only goes into the hash that makes the cache key.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
+from eodhd_guard_mcp.ledger import make_private
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ def _connect(path: Path) -> sqlite3.Connection:
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.close(os.open(path, os.O_RDWR | os.O_CREAT, 0o600))
+        make_private(path)  # before SQLite makes its own files, which copy the mode of the database
         conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     except (OSError, sqlite3.Error) as exc:
         raise GuardError(
@@ -56,7 +59,17 @@ def _connect(path: Path) -> sqlite3.Connection:
     with contextlib.suppress(sqlite3.Error):
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+    make_private(path)  # write-ahead files left by an earlier run keep the mode they had
     return conn
+
+
+def key_fingerprint(secret: str) -> str:
+    """The first 12 hex digits of the SHA-256 of ``secret``, to tell two API keys apart in a cache key.
+
+    A one-way hash of a long random token, kept short: it identifies a key among a few, and gives no way
+    back to it. It is stored only inside the hashed cache key.
+    """
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:12]
 
 
 def _stringify(value: Any) -> str:
@@ -116,11 +129,21 @@ class ResponseCache:
             ) from None
         self._conn = conn
 
+    @property
+    def enabled(self) -> bool:
+        """True while the cache reads and writes; false when it was switched off or has been closed."""
+        return self._conn is not None
+
     @staticmethod
-    def make_key(path: str, params: Mapping[str, Any]) -> str:
-        """SHA-256 of the path and the sorted parameters, ignoring ``api_token`` and parameter order."""
+    def make_key(path: str, params: Mapping[str, Any], *, base_url: str = "", fingerprint: str = "") -> str:
+        """SHA-256 of the server, the key fingerprint, the path and the sorted parameters.
+
+        ``api_token`` and the parameter order are ignored. ``base_url`` and ``fingerprint`` (from
+        ``key_fingerprint``) keep answers apart when the server (a proxy, say) or the API key changes, so
+        an answer fetched for one is not served to the other.
+        """
         pairs = sorted(normalize_params(params).items())
-        payload = json.dumps([path.strip("/"), pairs], separators=(",", ":"))
+        payload = json.dumps([base_url, fingerprint, path.strip("/"), pairs], separators=(",", ":"))
         return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
     def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> tuple[list[tuple[Any, ...]], int] | None:
@@ -135,18 +158,26 @@ class ResponseCache:
             logger.warning("Response cache operation failed (%s); continuing without it.", type(exc).__name__)
             return None
 
-    def get(self, key: str) -> CachedResponse | None:
-        """The stored answer, or None when it is missing, expired, unreadable or the cache is off."""
+    def get(self, key: str, *, max_age_s: float | None = None) -> CachedResponse | None:
+        """The stored answer, or None when it is missing, expired, unreadable or the cache is off.
+
+        An answer is stored for the lifetime its writer chose, and a reader may want fresher data than
+        that: with ``max_age_s``, an answer stored more than that many seconds ago is a miss for this
+        reader only. It stays in the cache for readers that accept older ones.
+        """
         result = self._execute("SELECT status, body, created, expires FROM responses WHERE key = ?", (key,))
         if result is None or not result[0]:
             return None
         status, blob, created, expires = result[0][0]
+        now = self._clock().timestamp()
         body: bytes | None = None
-        if expires > self._clock().timestamp():
+        if expires > now:
             with contextlib.suppress(zlib.error):
                 body = zlib.decompress(blob)
         if body is None:
             self._execute("DELETE FROM responses WHERE key = ?", (key,))
+            return None
+        if max_age_s is not None and now - created > max_age_s:
             return None
         return CachedResponse(status=status, body=body, created=datetime.fromtimestamp(created, timezone.utc))
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import gc
 import json
 import logging
 import sqlite3
@@ -15,7 +16,7 @@ from typing import Any
 import httpx2
 import pytest
 
-from eodhd_guard_mcp.cache import ResponseCache
+from eodhd_guard_mcp.cache import ResponseCache, key_fingerprint
 from eodhd_guard_mcp.client import (
     ACCOUNT_FIELDS,
     ApiResponse,
@@ -44,15 +45,25 @@ async def fetch(
     endpoint: str = "eod",
     cost: int = 1,
     ttl_s: float = 3600,
+    max_age_s: float | None = None,
     symbol: str | None = "ACME.US",
 ) -> ApiResponse:
-    return await deps.client.get(path, params, endpoint=endpoint, cost=cost, ttl_s=ttl_s, symbol=symbol)
+    return await deps.client.get(
+        path, params, endpoint=endpoint, cost=cost, ttl_s=ttl_s, max_age_s=max_age_s, symbol=symbol
+    )
 
 
 def ledger_rows(settings: Settings) -> list[tuple[Any, ...]]:
     """(endpoint, cost, status, cached, symbol) for every row in the ledger, oldest first."""
     with sqlite3.connect(settings.state_dir / "usage.sqlite") as conn:
         return conn.execute("SELECT endpoint, cost, status, cached, symbol FROM calls ORDER BY id").fetchall()
+
+
+def cache_key(path: str = EOD, params: dict[str, Any] | None = None) -> str:
+    """The key the client files an answer under, for tests that write to or look into the cache."""
+    return ResponseCache.make_key(
+        path, params or {}, base_url=MockEODHD.base_url, fingerprint=key_fingerprint(TEST_KEY)
+    )
 
 
 def assert_no_key(error: GuardError) -> None:
@@ -90,6 +101,80 @@ async def make_deps(
     yield factory
     for deps in built:
         await deps.aclose()
+
+
+class SlowApi:
+    """An EODHD that answers only when told to, so that several calls can wait on one request."""
+
+    def __init__(
+        self,
+        status: int = 200,
+        body: Any = None,
+        text: str | None = None,
+        raises: BaseException | None = None,
+    ) -> None:
+        self.requests = 0
+        self.arrived = asyncio.Event()
+        self.release = asyncio.Event()
+        self._status = status
+        self._body = DATA if body is None else body
+        self._text = text
+        self._raises = raises
+
+    async def until(self, count: int) -> None:
+        """Wait until ``count`` requests have arrived."""
+        while self.requests < count:
+            self.arrived.clear()
+            await self.arrived.wait()
+
+    async def handle(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests += 1
+        self.arrived.set()
+        await self.release.wait()
+        if self._raises is not None:
+            raise self._raises
+        if self._text is not None:
+            return httpx2.Response(self._status, content=self._text.encode())
+        return httpx2.Response(self._status, json=self._body)
+
+
+@pytest.fixture
+async def make_slow_deps(
+    settings: Settings, clock: FixedClock, sleeps: RecordingSleep
+) -> AsyncIterator[Callable[..., tuple[SlowApi, Deps]]]:
+    """A Deps over a ``SlowApi``; everything is closed afterwards."""
+    built: list[Deps] = []
+
+    def factory(*, api: SlowApi | None = None, **changes: Any) -> tuple[SlowApi, Deps]:
+        slow = api or SlowApi()
+        new = build_deps(
+            dataclasses.replace(settings, **changes),
+            transport=httpx2.MockTransport(slow.handle),
+            clock=clock,
+            sleep=sleeps,
+        )
+        built.append(new)
+        return slow, new
+
+    yield factory
+    for deps in built:
+        slow_release_all(deps)
+        await deps.aclose()
+
+
+def slow_release_all(deps: Deps) -> None:
+    """Leave nothing waiting on a gate that a failed test never opened."""
+    for flight in list(deps.client._flights.values()):
+        flight.cancel()
+
+
+async def settle(deps: Deps) -> None:
+    """Let every finished request clear itself from the client, then check that it did."""
+    for _ in range(50):
+        if not deps.client._flights:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("a request is still registered as in flight")
 
 
 class TestGet:
@@ -276,7 +361,7 @@ class TestCache:
         self, deps: Deps, mock_api: MockEODHD, settings: Settings, clock: FixedClock
     ) -> None:
         mock_api.add(EOD, DATA)
-        key = ResponseCache.make_key(EOD, {})
+        key = cache_key()
         deps.cache.set(key, endpoint="eod", status=200, body=b"<html>", ttl_s=60)
         result = await fetch(deps)
         assert result.cached is False
@@ -286,7 +371,7 @@ class TestCache:
         self, deps: Deps, mock_api: MockEODHD, settings: Settings, clock: FixedClock
     ) -> None:
         mock_api.add(EOD, DATA)
-        key = ResponseCache.make_key(EOD, {})
+        key = cache_key()
         with sqlite3.connect(settings.state_dir / "cache.sqlite") as conn:
             conn.execute(
                 "INSERT INTO responses (key, endpoint, created, expires, status, body)"
@@ -294,6 +379,91 @@ class TestCache:
                 (key, "eod", clock().timestamp(), clock().timestamp() + 60, 500, zlib.compress(b"[]")),
             )
         assert (await fetch(deps)).cached is False
+
+    async def test_a_reader_that_wants_fresher_data_is_not_served_an_older_entry(
+        self, deps: Deps, mock_api: MockEODHD, clock: FixedClock
+    ) -> None:
+        # One caller keeps a range for 6 hours and another, asking the same question, for 1 hour.
+        mock_api.add(EOD, DATA, times=1)
+        mock_api.add(EOD, [*DATA, DATA[0]])
+        await fetch(deps, ttl_s=6 * 3600)
+        clock.advance(hours=2)
+        patient = await fetch(deps, ttl_s=6 * 3600)
+        assert patient.cached is True
+        strict = await fetch(deps, ttl_s=3600)
+        assert strict.cached is False
+        assert mock_api.count() == 2
+        # The newer answer was stored under the stricter caller's lifetime, and is fresh for both.
+        assert (await fetch(deps, ttl_s=6 * 3600)).cached is True
+        assert mock_api.count() == 2
+
+    async def test_a_call_whose_lifetime_shrinks_can_name_the_age_it_still_accepts(
+        self, deps: Deps, mock_api: MockEODHD, clock: FixedClock
+    ) -> None:
+        # Some answers are kept until the next bar is due, which can be minutes away. Such a call stores for
+        # that short time, but an answer still inside its own lifetime is fine for it up to the longest.
+        mock_api.add(EOD, DATA)
+        await fetch(deps, ttl_s=3600)
+        clock.advance(minutes=20)
+        assert (await fetch(deps, ttl_s=300, max_age_s=3600)).cached is True
+        assert mock_api.count() == 1
+        assert (await fetch(deps, ttl_s=300)).cached is False
+        assert mock_api.count() == 2
+
+    async def test_the_new_answer_of_a_short_lived_call_lasts_only_that_long(
+        self, deps: Deps, mock_api: MockEODHD, clock: FixedClock
+    ) -> None:
+        mock_api.add(EOD, DATA)
+        await fetch(deps, ttl_s=300, max_age_s=3600)
+        clock.advance(seconds=301)
+        assert (await fetch(deps, ttl_s=300, max_age_s=3600)).cached is False
+
+    async def test_an_answer_is_filed_under_the_key_of_its_server_and_api_key(
+        self, deps: Deps, mock_api: MockEODHD
+    ) -> None:
+        mock_api.add(EOD, DATA)
+        await fetch(deps, params={"from": "2026-10-01"})
+        stored = deps.cache.get(cache_key(EOD, {"from": "2026-10-01"}))
+        assert stored is not None
+        assert json.loads(stored.body) == DATA
+        assert deps.cache.get(cache_key(EOD, {"from": "2026-10-02"})) is None
+        assert deps.cache.get(ResponseCache.make_key(EOD, {"from": "2026-10-01"})) is None
+
+    async def test_the_cache_key_depends_on_the_server_it_asked(
+        self, deps: Deps, make_deps: Callable[..., Deps], mock_api: MockEODHD
+    ) -> None:
+        mock_api.add(EOD, DATA)
+        await fetch(deps)
+        # A proxy at another address is another source: nothing fetched from the first is served by it.
+        proxy = make_deps(base_url="https://proxy.example/api")
+        assert (await fetch(proxy)).cached is False
+        assert mock_api.count() == 2
+        assert (await fetch(proxy)).cached is True
+        assert (await fetch(deps)).cached is True
+        assert mock_api.count() == 2
+
+    async def test_the_cache_key_depends_on_the_api_key(
+        self, deps: Deps, make_deps: Callable[..., Deps], mock_api: MockEODHD
+    ) -> None:
+        mock_api.add(EOD, DATA)
+        await fetch(deps)
+        other = make_deps(api_key="another-key-0123456789")
+        again = await fetch(other)
+        assert again.cached is False
+        assert mock_api.count() == 2
+        assert (await fetch(other)).cached is True
+        # Each key reads its own entry, and the first key's entry was not replaced.
+        assert (await fetch(deps)).cached is True
+        assert mock_api.count() == 2
+
+    async def test_the_same_key_and_server_share_the_cache_between_sessions(
+        self, deps: Deps, make_deps: Callable[..., Deps], mock_api: MockEODHD
+    ) -> None:
+        mock_api.add(EOD, DATA)
+        await fetch(deps)
+        later = make_deps()
+        assert (await fetch(later)).cached is True
+        assert mock_api.count() == 1
 
 
 class TestNotFound:
@@ -340,25 +510,295 @@ class TestNotFound:
         assert mock_api.count() == 1
         assert ledger_rows(settings) == [("eod", 0, 404, 0, "ACME.US"), ("eod", 0, 404, 1, "ACME.US")]
 
-    async def test_a_cached_404_is_forgotten_after_a_day(
+    async def test_a_cached_404_is_forgotten_after_a_day_at_the_latest(
         self, deps: Deps, mock_api: MockEODHD, clock: FixedClock
     ) -> None:
+        week = 7 * 24 * 3600
         mock_api.add(EOD, status=404, text="Ticker Not Found.", times=1)
         mock_api.add(EOD, DATA)
         with pytest.raises(GuardError):
-            await fetch(deps)
+            await fetch(deps, ttl_s=week)
         clock.advance(hours=23)
         with pytest.raises(GuardError):
-            await fetch(deps)
+            await fetch(deps, ttl_s=week)
         assert mock_api.count() == 1
         clock.advance(hours=2)
-        assert (await fetch(deps)).data == DATA
+        assert (await fetch(deps, ttl_s=week)).data == DATA
+
+    async def test_a_cached_404_lasts_only_as_long_as_the_calls_own_ttl(
+        self, deps: Deps, mock_api: MockEODHD, clock: FixedClock
+    ) -> None:
+        # A quote is cached for a minute, so a code that was unknown a moment ago must not stay unknown for
+        # a day: a new listing would be refused until tomorrow.
+        mock_api.add(EOD, status=404, text="Ticker Not Found.", times=1)
+        mock_api.add(EOD, DATA)
+        with pytest.raises(GuardError):
+            await fetch(deps, ttl_s=60)
+        clock.advance(seconds=59)
+        with pytest.raises(GuardError):
+            await fetch(deps, ttl_s=60)
+        assert mock_api.count() == 1
+        clock.advance(seconds=2)
+        assert (await fetch(deps, ttl_s=60)).data == DATA
+        assert mock_api.count() == 2
+
+    async def test_a_404_is_not_cached_at_all_when_the_ttl_is_zero(
+        self, deps: Deps, mock_api: MockEODHD
+    ) -> None:
+        mock_api.add(EOD, status=404, text="Ticker Not Found.")
+        for _ in range(2):
+            with pytest.raises(GuardError):
+                await fetch(deps, ttl_s=0)
+        assert mock_api.count() == 2
 
     async def test_a_404_is_not_billed(self, deps: Deps, mock_api: MockEODHD) -> None:
         mock_api.add(EOD, status=404, text="Ticker Not Found.")
         with pytest.raises(GuardError):
             await fetch(deps, cost=10)
         assert deps.ledger.spent_today() == 0
+
+
+class TestSingleFlight:
+    async def test_identical_calls_made_together_send_one_request_and_pay_once(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]], settings: Settings
+    ) -> None:
+        api, deps = make_slow_deps()
+        calls = [asyncio.create_task(fetch(deps)) for _ in range(3)]
+        await api.arrived.wait()
+        api.release.set()
+        results = await asyncio.gather(*calls)
+        assert api.requests == 1
+        # The caller that sent the request pays; the others get its answer as a cache hit.
+        assert [(r.cached, r.cost) for r in results] == [(False, 1), (True, 0), (True, 0)]
+        assert all(r.data == DATA for r in results)
+        assert all(r.fetched_at == results[0].fetched_at for r in results)
+        assert deps.ledger.spent_today() == 1
+        assert ledger_rows(settings) == [
+            ("eod", 1, 200, 0, "ACME.US"),
+            ("eod", 0, 200, 1, "ACME.US"),
+            ("eod", 0, 200, 1, "ACME.US"),
+        ]
+        today = deps.ledger.summary()["today"]
+        assert (today["cost"], today["requests"], today["cache_hits"]) == (1, 1, 2)
+        await settle(deps)
+
+    async def test_a_caller_that_waited_is_recorded_under_its_own_symbol_and_the_body_size(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]], settings: Settings
+    ) -> None:
+        api, deps = make_slow_deps()
+        first = asyncio.create_task(fetch(deps, symbol="ACME.US"))
+        second = asyncio.create_task(fetch(deps, symbol=None))
+        await api.arrived.wait()
+        api.release.set()
+        await asyncio.gather(first, second)
+        with sqlite3.connect(settings.state_dir / "usage.sqlite") as conn:
+            rows = conn.execute("SELECT symbol, bytes, cached FROM calls ORDER BY id").fetchall()
+        assert rows[0][0] == "ACME.US"
+        assert rows[1] == (None, rows[0][1], 1)
+        assert rows[0][1] > 0
+
+    async def test_calls_that_share_a_request_do_not_use_up_the_budget(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        # 25 is room for two 10-unit reads but not three. Three reads of one document are one request.
+        api, deps = make_slow_deps(daily_budget=25)
+        calls = [asyncio.create_task(fetch(deps, cost=10)) for _ in range(3)]
+        await api.arrived.wait()
+        api.release.set()
+        results = await asyncio.gather(*calls)
+        assert sum(r.cost for r in results) == 10
+        assert deps.ledger.spent_today() == 10
+        assert deps.client._pending == 0
+
+    async def test_calls_for_different_questions_each_send_their_own_request(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        calls = [
+            asyncio.create_task(fetch(deps, params={"from": "2026-10-01"})),
+            asyncio.create_task(fetch(deps, params={"from": "2026-10-15"})),
+            asyncio.create_task(fetch(deps, "eod/GLOBEX.LSE")),
+        ]
+        await api.until(3)
+        api.release.set()
+        results = await asyncio.gather(*calls)
+        assert [(r.cached, r.cost) for r in results] == [(False, 1)] * 3
+        assert deps.ledger.spent_today() == 3
+
+    async def test_a_call_made_after_the_request_finished_is_an_ordinary_cache_hit(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        api.release.set()
+        await fetch(deps)
+        await settle(deps)
+        again = await fetch(deps)
+        assert again.cached is True
+        assert api.requests == 1
+
+    @pytest.mark.parametrize(
+        ("status", "text", "code", "billed"),
+        [
+            (404, "Ticker Not Found.", ErrorCode.NOT_FOUND, 0),
+            (401, "Unauthorized", ErrorCode.AUTH_ERROR, 0),
+            (500, "boom", ErrorCode.UPSTREAM_ERROR, 0),
+            (200, "<html>not json</html>", ErrorCode.BAD_RESPONSE, 1),  # a 200 is billed, once
+        ],
+    )
+    async def test_an_error_reaches_every_caller_that_waited(
+        self,
+        make_slow_deps: Callable[..., tuple[SlowApi, Deps]],
+        status: int,
+        text: str,
+        code: ErrorCode,
+        billed: int,
+    ) -> None:
+        api, deps = make_slow_deps(api=SlowApi(status=status, text=text), max_retries=0)
+        calls = [asyncio.create_task(fetch(deps)) for _ in range(3)]
+        await api.arrived.wait()
+        api.release.set()
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        errors = [r for r in results if isinstance(r, GuardError)]
+        assert len(errors) == 3
+        assert api.requests == 1
+        assert {e.code for e in errors} == {code}
+        assert len({e.message for e in errors}) == 1
+        assert len({e.hint for e in errors}) == 1
+        assert errors[0].details == errors[1].details == errors[2].details
+        # Each caller gets an error of its own, not one object raised in three places.
+        assert len({id(e) for e in errors}) == 3
+        assert len({id(e.details) for e in errors}) == 3
+        for error in errors:
+            assert_no_key(error)
+        assert deps.ledger.spent_today() == billed
+        await settle(deps)
+
+    async def test_a_refused_budget_reaches_every_caller_and_nothing_is_sent(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps(daily_budget=3)
+        calls = [asyncio.create_task(fetch(deps, cost=5)) for _ in range(3)]
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        assert [isinstance(r, GuardError) and r.code for r in results] == [ErrorCode.BUDGET_EXCEEDED] * 3
+        assert api.requests == 0
+        await settle(deps)
+
+    async def test_a_failure_that_is_not_a_guard_error_reaches_every_caller_as_it_is(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        broken = RuntimeError("a bug")
+        api, deps = make_slow_deps(api=SlowApi(raises=broken))
+        calls = [asyncio.create_task(fetch(deps)) for _ in range(2)]
+        await api.arrived.wait()
+        api.release.set()
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        assert results == [broken, broken]
+        assert deps.client._pending == 0
+        await settle(deps)
+
+    async def test_cancelling_a_caller_that_waited_does_not_cancel_the_request_for_the_others(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        first, second, third = (asyncio.create_task(fetch(deps)) for _ in range(3))
+        await api.arrived.wait()
+        second.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await second
+        api.release.set()
+        results = await asyncio.gather(first, third)
+        assert [(r.cached, r.cost) for r in results] == [(False, 1), (True, 0)]
+        assert api.requests == 1
+        assert deps.ledger.spent_today() == 1
+        await settle(deps)
+
+    async def test_cancelling_the_caller_that_sent_the_request_leaves_it_to_the_others(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]], settings: Settings
+    ) -> None:
+        api, deps = make_slow_deps()
+        first, second = (asyncio.create_task(fetch(deps)) for _ in range(2))
+        await api.arrived.wait()
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        api.release.set()
+        result = await second
+        # The request was paid for by the caller that left; the one that stayed is served from it.
+        assert (result.cached, result.cost, result.data) == (True, 0, DATA)
+        assert ledger_rows(settings) == [("eod", 1, 200, 0, "ACME.US"), ("eod", 0, 200, 1, "ACME.US")]
+        await settle(deps)
+
+    async def test_when_every_caller_leaves_the_request_still_finishes_and_fills_the_cache(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        calls = [asyncio.create_task(fetch(deps)) for _ in range(2)]
+        await api.arrived.wait()
+        for call in calls:
+            call.cancel()
+        await asyncio.gather(*calls, return_exceptions=True)
+        assert len(deps.client._flights) == 1
+        api.release.set()
+        await settle(deps)
+        again = await fetch(deps)
+        assert again.cached is True
+        assert api.requests == 1
+        assert deps.ledger.spent_today() == 1
+
+    async def test_a_failed_request_nobody_waits_for_is_not_reported_as_forgotten(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        reported: list[dict[str, Any]] = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: reported.append(context))
+        api, deps = make_slow_deps(api=SlowApi(status=500, text="boom"), max_retries=0)
+        call = asyncio.create_task(fetch(deps))
+        await api.arrived.wait()
+        call.cancel()
+        await asyncio.gather(call, return_exceptions=True)
+        del call  # the cancelled task's traceback would keep the request alive, and unreported
+        api.release.set()
+        await settle(deps)
+        gc.collect()
+        await asyncio.sleep(0)
+        assert reported == []
+
+    async def test_with_the_cache_off_every_call_sends_its_own_request(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]], settings: Settings
+    ) -> None:
+        api, deps = make_slow_deps(cache_enabled=False)
+        calls = [asyncio.create_task(fetch(deps)) for _ in range(2)]
+        await api.until(2)
+        api.release.set()
+        results = await asyncio.gather(*calls)
+        assert [(r.cached, r.cost) for r in results] == [(False, 1), (False, 1)]
+        assert deps.ledger.spent_today() == 2
+        assert deps.client._flights == {}
+
+    async def test_closing_the_client_cancels_a_request_in_flight_and_frees_its_budget(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        call = asyncio.create_task(fetch(deps))
+        await api.arrived.wait()
+        await deps.client.aclose()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        assert deps.client._flights == {}
+        assert deps.client._pending == 0
+        assert deps.ledger.spent_today() == 0
+        # The client opens a new connection for the next call, as after any close.
+        api.release.set()
+        assert (await fetch(deps)).cost == 1
+
+    async def test_closing_a_client_with_nothing_in_flight_is_unchanged(
+        self, make_slow_deps: Callable[..., tuple[SlowApi, Deps]]
+    ) -> None:
+        api, deps = make_slow_deps()
+        api.release.set()
+        await fetch(deps)
+        await settle(deps)
+        await deps.client.aclose()
+        await deps.client.aclose()
 
 
 class TestBudget:
@@ -937,7 +1377,14 @@ class TestKeyHygiene:
         assert all(TEST_KEY.encode() not in body for body in bodies)
         with sqlite3.connect(settings.state_dir / "cache.sqlite") as conn:
             keys = [row[0] for row in conn.execute("SELECT key FROM responses")]
-        assert all(len(key) == 64 for key in keys)
+        assert keys
+        # A cache key is a digest. It is made from the server and a fingerprint of the key, and shows neither.
+        assert all(len(key) == 64 and int(key, 16) >= 0 for key in keys)
+        fingerprint = key_fingerprint(TEST_KEY).encode()
+        for path in files:
+            raw = path.read_bytes()
+            assert fingerprint not in raw
+            assert MockEODHD.base_url.encode() not in raw
 
 
 class TestAccount:
@@ -990,6 +1437,14 @@ class TestAccount:
         assert account["subscriptionType"] == "plan ***"
         assert account["extraLimit"] == 2.5
         assert account["apiRequests"] is True
+
+    async def test_a_long_text_is_cut_to_200_characters_after_the_key_is_masked(
+        self, deps: Deps, mock_api: MockEODHD
+    ) -> None:
+        mock_api.add("user", {"subscriptionType": "x" * 195 + TEST_KEY, "subscriptionMode": "y" * 500})
+        account = await deps.client.get_account()
+        assert account["subscriptionType"] == "x" * 195 + "***"
+        assert account["subscriptionMode"] == "y" * 197 + "..."
 
     @pytest.mark.parametrize("body", ["[]", '"text"', "7", "not json", ""])
     async def test_an_answer_that_is_not_an_object_is_a_bad_response(

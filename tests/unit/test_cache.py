@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 import stat
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from eodhd_guard_mcp.cache import ResponseCache, normalize_params
+from eodhd_guard_mcp.cache import ResponseCache, key_fingerprint, normalize_params
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
 from tests.helpers import TEST_KEY, FixedClock
 
@@ -81,6 +82,55 @@ class TestMakeKey:
         a = ResponseCache.make_key("p", {"a": "1&b=2"})
         b = ResponseCache.make_key("p", {"a": "1", "b": "2"})
         assert a != b
+
+
+class TestKeyScope:
+    def test_without_a_scope_the_key_is_the_same_as_with_an_empty_one(self) -> None:
+        plain = ResponseCache.make_key("eod/ACME.US", {"period": "d"})
+        assert ResponseCache.make_key("eod/ACME.US", {"period": "d"}, base_url="", fingerprint="") == plain
+
+    def test_another_server_is_another_question(self) -> None:
+        eodhd = ResponseCache.make_key("eod/ACME.US", {}, base_url="https://eodhd.com/api")
+        proxy = ResponseCache.make_key("eod/ACME.US", {}, base_url="https://proxy.example/api")
+        assert eodhd != proxy
+        assert eodhd == ResponseCache.make_key("eod/ACME.US", {}, base_url="https://eodhd.com/api")
+
+    def test_another_key_is_another_question(self) -> None:
+        one = ResponseCache.make_key("eod/ACME.US", {}, fingerprint=key_fingerprint("first-key-0123456789"))
+        two = ResponseCache.make_key("eod/ACME.US", {}, fingerprint=key_fingerprint("second-key-9876543210"))
+        assert one != two
+
+    def test_the_server_and_the_key_cannot_trade_places(self) -> None:
+        a = ResponseCache.make_key("p", {}, base_url="aaa", fingerprint="bbb")
+        b = ResponseCache.make_key("p", {}, base_url="bbb", fingerprint="aaa")
+        assert a != b
+
+    def test_the_server_cannot_be_confused_with_the_path(self) -> None:
+        assert ResponseCache.make_key("b/c", {}, base_url="a") != ResponseCache.make_key(
+            "c", {}, base_url="a/b"
+        )
+
+    def test_the_key_is_still_a_digest_that_holds_neither_the_server_nor_the_api_key(self) -> None:
+        key = ResponseCache.make_key(
+            "eod/ACME.US", {}, base_url="https://eodhd.test/api", fingerprint=key_fingerprint(TEST_KEY)
+        )
+        assert len(key) == 64
+        assert TEST_KEY not in key
+        assert key_fingerprint(TEST_KEY) not in key
+        assert "eodhd" not in key
+
+
+class TestKeyFingerprint:
+    def test_it_is_the_first_twelve_hex_digits_of_the_sha256(self) -> None:
+        assert (
+            key_fingerprint("test-key-0123456789") == hashlib.sha256(b"test-key-0123456789").hexdigest()[:12]
+        )
+        assert len(key_fingerprint("a")) == 12
+
+    def test_different_keys_give_different_fingerprints_and_none_shows_the_key(self) -> None:
+        assert key_fingerprint("first-key-0123456789") != key_fingerprint("second-key-9876543210")
+        assert key_fingerprint(TEST_KEY) == key_fingerprint(TEST_KEY)
+        assert TEST_KEY not in key_fingerprint(TEST_KEY)
 
 
 class TestNormalizeParams:
@@ -181,6 +231,58 @@ class TestStore:
         assert cache.get("bad") is None
         with sqlite3.connect(db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM responses").fetchone() == (0,)
+
+
+class TestMaxAge:
+    def test_an_answer_older_than_the_age_a_reader_accepts_is_a_miss(
+        self, cache: ResponseCache, clock: FixedClock
+    ) -> None:
+        store(cache, ttl_s=6 * 3600)
+        clock.advance(hours=2)
+        assert cache.get("k", max_age_s=3600) is None
+
+    def test_an_answer_exactly_as_old_as_the_age_is_still_a_hit(
+        self, cache: ResponseCache, clock: FixedClock
+    ) -> None:
+        store(cache, ttl_s=6 * 3600)
+        clock.advance(seconds=3600)
+        assert cache.get("k", max_age_s=3600) is not None
+        clock.advance(seconds=1)
+        assert cache.get("k", max_age_s=3600) is None
+
+    def test_a_miss_by_age_leaves_the_answer_for_readers_that_accept_older_ones(
+        self, cache: ResponseCache, clock: FixedClock
+    ) -> None:
+        store(cache, ttl_s=6 * 3600)
+        clock.advance(hours=2)
+        assert cache.get("k", max_age_s=3600) is None
+        kept = cache.get("k", max_age_s=6 * 3600)
+        assert kept is not None
+        assert kept.body == BODY
+        assert cache.get("k") is not None
+
+    def test_without_an_age_only_the_expiry_counts(self, cache: ResponseCache, clock: FixedClock) -> None:
+        store(cache, ttl_s=6 * 3600)
+        clock.advance(hours=5)
+        assert cache.get("k", max_age_s=None) is not None
+
+    def test_the_age_applies_to_a_stored_404_too(self, cache: ResponseCache, clock: FixedClock) -> None:
+        store(cache, status=404, body=b"Ticker Not Found.", ttl_s=24 * 3600)
+        clock.advance(minutes=10)
+        assert cache.get("k", max_age_s=60) is None
+        assert cache.get("k", max_age_s=3600) is not None
+
+
+class TestEnabled:
+    def test_it_is_enabled_while_open(self, cache: ResponseCache) -> None:
+        assert cache.enabled is True
+
+    def test_it_is_not_enabled_when_off_or_closed(
+        self, db_path: Path, clock: FixedClock, cache: ResponseCache
+    ) -> None:
+        assert ResponseCache(db_path.parent / "other.sqlite", enabled=False, clock=clock).enabled is False
+        cache.close()
+        assert cache.enabled is False
 
 
 class TestMaintenance:
@@ -288,6 +390,22 @@ class TestOpen:
             assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
             for path in db_path.parent.iterdir():
                 assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+    def test_a_folder_and_database_that_were_open_to_others_are_closed_when_it_opens(
+        self, cache: ResponseCache, db_path: Path, clock: FixedClock
+    ) -> None:
+        store(cache)
+        db_path.parent.chmod(0o777)
+        for path in db_path.parent.iterdir():
+            path.chmod(0o666)
+        second = ResponseCache(db_path, enabled=True, clock=clock)
+        store(second, "again")
+        assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+        modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in db_path.parent.iterdir()}
+        assert set(modes) >= {"cache.sqlite", "cache.sqlite-wal", "cache.sqlite-shm"}
+        assert set(modes.values()) == {0o600}
+        second.close()
 
     def test_the_table_has_the_documented_columns(self, cache: ResponseCache, db_path: Path) -> None:
         with sqlite3.connect(db_path) as conn:

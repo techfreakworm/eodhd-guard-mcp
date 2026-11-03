@@ -21,6 +21,8 @@ from eodhd_guard_mcp.markets import (
     _count_sessions,
     expected_latest_session,
     market_for,
+    next_ready_at,
+    session_on_or_before,
     session_state,
     sessions_between,
 )
@@ -560,6 +562,105 @@ def test_across_clock_changes_the_answer_never_goes_back_or_lands_on_a_weekend(
             assert latest >= previous
         previous = latest
         moment += timedelta(minutes=41)
+
+
+# ------------------------------------------------------------------------------------------ next_ready_at
+
+# (exchange, now, the instant the next end-of-day bar is expected), each worked out by hand.
+# Tuesday 2026-11-03 is on EST (UTC-5): the US close plus 30 minutes is 16:30 EST, which is 21:30 UTC.
+NEXT_READY_CASES = [
+    at("US", utc(2026, 11, 3, 15, 0), utc(2026, 11, 3, 21, 30), "tue-morning-waits-for-today"),
+    at("US", utc(2026, 11, 3, 21, 29), utc(2026, 11, 3, 21, 30), "tue-one-minute-before"),
+    at("US", utc(2026, 11, 3, 21, 30), utc(2026, 11, 4, 21, 30), "tue-exactly-ready-waits-for-wed"),
+    at("US", utc(2026, 11, 3, 23, 0), utc(2026, 11, 4, 21, 30), "tue-evening"),
+    at("US", utc(2026, 11, 6, 22, 0), utc(2026, 11, 9, 21, 30), "friday-evening-skips-the-weekend"),
+    at("US", utc(2026, 11, 7, 12, 0), utc(2026, 11, 9, 21, 30), "saturday"),
+    at("US", utc(2026, 11, 8, 23, 0), utc(2026, 11, 9, 21, 30), "sunday-night"),
+    at("US", utc(2026, 11, 9, 8, 0), utc(2026, 11, 9, 21, 30), "monday-morning"),
+    # The clocks go forward on Sunday 2026-03-08: Monday's 16:30 is EDT (UTC-4), which is 20:30 UTC.
+    at("US", utc(2026, 3, 6, 22, 0), utc(2026, 3, 9, 20, 30), "spring-friday-to-monday-edt"),
+    # They go back on Sunday 2026-11-01: Monday's 16:30 is EST again, 21:30 UTC.
+    at("US", utc(2026, 10, 30, 21, 0), utc(2026, 11, 2, 21, 30), "autumn-friday-to-monday-est"),
+    # London closes 16:30 and the bar is 2 h later: 18:30 GMT.
+    at("LSE", utc(2026, 11, 3, 12, 0), utc(2026, 11, 3, 18, 30), "lse-tue-noon"),
+    at("LSE", utc(2026, 3, 27, 19, 0), utc(2026, 3, 30, 17, 30), "lse-spring-to-bst"),
+    # India: 15:30 plus 5 h is 20:30 IST, which is 15:00 UTC, all year.
+    at("NSE", utc(2026, 11, 3, 14, 59), utc(2026, 11, 3, 15, 0), "nse-one-minute-before"),
+    at("NSE", utc(2026, 11, 3, 15, 0), utc(2026, 11, 4, 15, 0), "nse-exactly-ready"),
+    # Sydney is ahead of UTC: Wednesday 2026-11-04 16:00 plus 4 h is 20:00 AEDT, which is 09:00 UTC.
+    at("AU", utc(2026, 11, 3, 20, 0), utc(2026, 11, 4, 9, 0), "au-wed-morning-in-sydney"),
+    # Crypto has no weekend, and its day's bar is due at 00:59 UTC the next day.
+    at("CC", utc(2026, 11, 7, 12, 0), utc(2026, 11, 8, 0, 59), "crypto-saturday"),
+    at("CC", utc(2026, 11, 8, 0, 59), utc(2026, 11, 9, 0, 59), "crypto-exactly-ready"),
+    # An exchange the table does not know: close 23:59 UTC plus 6 h, so 05:59 UTC the next day.
+    at("ZZ", utc(2026, 11, 3, 12, 0), utc(2026, 11, 4, 5, 59), "unknown-tue"),
+    at("ZZ", utc(2026, 11, 6, 12, 0), utc(2026, 11, 7, 5, 59), "unknown-friday-bar-is-due-on-saturday"),
+    at("ZZ", utc(2026, 11, 7, 12, 0), utc(2026, 11, 10, 5, 59), "unknown-saturday-skips-the-weekend"),
+]
+
+
+@pytest.mark.parametrize(("exchange", "now", "expected"), NEXT_READY_CASES)
+def test_next_ready_at(exchange: str, now: datetime, expected: datetime) -> None:
+    ready = next_ready_at(exchange, now)
+    assert ready == expected
+    assert ready.utcoffset() == timedelta(0)
+
+
+def test_next_ready_at_reads_a_naive_now_as_utc_and_ignores_case() -> None:
+    assert next_ready_at(" us ", datetime(2026, 11, 3, 15, 0)) == utc(2026, 11, 3, 21, 30)
+
+
+def test_next_ready_at_accepts_a_now_in_any_time_zone() -> None:
+    tokyo = datetime(2026, 11, 4, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo"))  # 15:00 UTC on 11-03
+    assert next_ready_at("US", tokyo) == utc(2026, 11, 3, 21, 30)
+
+
+def test_next_ready_at_steps_over_a_weekend_of_any_shape(sunday_to_thursday: MarketInfo) -> None:
+    # Thursday 12:00 UTC is exactly when Thursday's bar is due; Friday and Saturday are weekend.
+    assert expected_latest_session("GU", utc(2026, 11, 5, 12, 0)) == date(2026, 11, 5)
+    assert next_ready_at("GU", utc(2026, 11, 5, 12, 0)) == utc(2026, 11, 8, 12, 0)
+
+
+@pytest.mark.parametrize("start", SWEEP_WINDOWS)
+@pytest.mark.parametrize("exchange", [*EXPECTED_TABLE, "ZZ"])
+def test_the_next_bar_is_due_at_the_very_moment_the_expected_session_moves_on(
+    exchange: str, start: datetime
+) -> None:
+    market = market_for(exchange)
+    moment = start
+    while moment < start + timedelta(days=21):
+        ready = next_ready_at(exchange, moment)
+        latest = expected_latest_session(exchange, moment)
+        assert ready > moment
+        assert expected_latest_session(exchange, ready - timedelta(seconds=1)) == latest
+        following = expected_latest_session(exchange, ready)
+        assert following > latest
+        assert following.weekday() not in market.weekend
+        assert sessions_between(latest, following, exchange) == 1
+        moment += timedelta(minutes=41)
+
+
+# ---------------------------------------------------------------------------------- session_on_or_before
+
+
+@pytest.mark.parametrize(
+    ("exchange", "day", "expected"),
+    [
+        ("US", date(2026, 11, 3), date(2026, 11, 3)),  # a Tuesday is its own session
+        ("US", date(2026, 10, 30), date(2026, 10, 30)),  # so is a Friday
+        ("US", date(2026, 10, 31), date(2026, 10, 30)),  # Saturday goes back to Friday
+        ("US", date(2026, 11, 1), date(2026, 10, 30)),  # so does Sunday
+        ("CC", date(2026, 11, 1), date(2026, 11, 1)),  # crypto trades on Sunday
+        ("ZZ", date(2026, 11, 7), date(2026, 11, 6)),  # an unknown exchange has the default weekend
+    ],
+)
+def test_session_on_or_before(exchange: str, day: date, expected: date) -> None:
+    assert session_on_or_before(exchange, day) == expected
+
+
+def test_session_on_or_before_follows_a_sunday_to_thursday_week(sunday_to_thursday: MarketInfo) -> None:
+    assert session_on_or_before("GU", date(2026, 11, 7)) == date(2026, 11, 5)  # Saturday -> Thursday
+    assert session_on_or_before("GU", date(2026, 11, 8)) == date(2026, 11, 8)  # Sunday trades
 
 
 # ---------------------------------------------------------------------------------- sessions_between

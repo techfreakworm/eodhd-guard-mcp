@@ -8,7 +8,9 @@ this module: their text can carry the request URL, and the URL carries the key.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import email.utils
+import functools
 import json
 import logging
 import math
@@ -22,12 +24,12 @@ from urllib.parse import quote
 import httpx2
 
 from eodhd_guard_mcp import __version__
-from eodhd_guard_mcp.cache import CachedResponse, ResponseCache, normalize_params
+from eodhd_guard_mcp.cache import CachedResponse, ResponseCache, key_fingerprint, normalize_params
 from eodhd_guard_mcp.config import Settings
 from eodhd_guard_mcp.envelope import iso_utc
 from eodhd_guard_mcp.errors import ErrorCode, GuardError
 from eodhd_guard_mcp.ledger import Budget, UsageLedger, next_gmt_reset
-from eodhd_guard_mcp.redact import MASK, MIN_SECRET_LENGTH, redact
+from eodhd_guard_mcp.redact import MASK, MIN_SECRET_LENGTH, clip, redact
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,14 @@ class _Answer:
     @property
     def retryable(self) -> bool:
         return self.status in (0, 429) or self.status >= 500
+
+
+@dataclass(frozen=True)
+class _Fetched:
+    """One real request: its answer, and the size of the body for the rows of callers that shared it."""
+
+    response: ApiResponse
+    size: int
 
 
 def _parse_json(content: bytes) -> tuple[bool, Any]:
@@ -150,6 +160,8 @@ class EODHDClient:
         self._base_url = settings.base_url.rstrip("/")
         # Cost of requests that passed the budget check but are not in the ledger yet.
         self._pending = 0
+        # Requests on their way, by cache key: an identical call waits for one instead of sending another.
+        self._flights: dict[str, asyncio.Task[_Fetched]] = {}
         self._transport = transport
         self._http: httpx2.AsyncClient | None = None
 
@@ -175,38 +187,89 @@ class EODHDClient:
         endpoint: str,
         cost: int,
         ttl_s: float,
+        max_age_s: float | None = None,
         symbol: str | None = None,
     ) -> ApiResponse:
         """GET ``path`` (segments joined by ``/``; each is percent-encoded) and return the parsed JSON.
 
         ``endpoint`` is the cost key recorded in the ledger, ``cost`` what a successful answer is
-        charged, and ``ttl_s`` how long a 200 answer is cached. The key and ``fmt=json`` are added here.
-        A ``/`` inside a query can not be expressed in ``path``; replace it before calling.
+        charged, and ``ttl_s`` how long a 200 answer is cached. A 404 is cached for ``ttl_s`` too, but
+        never for more than a day. ``max_age_s`` is the oldest cached answer this call accepts and
+        defaults to ``ttl_s``, so a caller that keeps answers briefly is never served one that another
+        caller stored for longer. A call whose ``ttl_s`` shrinks with the time of day passes its longest
+        ``ttl_s`` as ``max_age_s``, so that an answer still inside its own lifetime is not turned away.
+        The key and ``fmt=json`` are added here. A ``/`` inside a query can not be expressed in ``path``;
+        replace it before calling.
+
+        Calls that ask the same question at the same time share one request: the first sends it and pays,
+        the others wait for it and are served its answer as a cache hit, or its error. Cancelling a caller
+        that waits does not cancel the request for the rest. With the cache off nothing is shared.
         """
         api_key = self._settings.require_key()
         segments = self._segments(path)
         clean = normalize_params(params)
         clean.pop("fmt", None)
-        cache_key = ResponseCache.make_key("/".join(segments), clean)
+        cache_key = ResponseCache.make_key(
+            "/".join(segments), clean, base_url=self._base_url, fingerprint=key_fingerprint(api_key)
+        )
 
         started = time.perf_counter()
-        cached = self._cache.get(cache_key)
+        cached = self._cache.get(cache_key, max_age_s=ttl_s if max_age_s is None else max_age_s)
         if cached is not None:
             served = self._serve_cached(cached, endpoint, symbol, started)
             if served is not None:
                 return served
 
+        fetch = functools.partial(
+            self._fetch,
+            segments,
+            clean,
+            api_key,
+            cache_key,
+            endpoint=endpoint,
+            cost=cost,
+            ttl_s=ttl_s,
+            symbol=symbol,
+        )
+        if not self._cache.enabled:
+            return (await fetch()).response
+        flight = self._flights.get(cache_key)
+        if flight is not None:
+            return await self._share(flight, endpoint, symbol, started)
+        # The request is a task of its own, so that cancelling one caller does not stop it for the others.
+        flight = asyncio.create_task(fetch())
+        self._flights[cache_key] = flight
+        flight.add_done_callback(functools.partial(self._landed, cache_key))
+        return (await asyncio.shield(flight)).response
+
+    async def _fetch(
+        self,
+        segments: list[str],
+        params: Mapping[str, str],
+        api_key: str,
+        cache_key: str,
+        *,
+        endpoint: str,
+        cost: int,
+        ttl_s: float,
+        symbol: str | None,
+    ) -> _Fetched:
+        """Check the budget, send the request, cache what came back and turn it into a result or an error."""
         self._budget.check(cost, pending=self._pending)
         self._pending += cost
         try:
-            answer = await self._send(segments, clean, api_key, endpoint=endpoint, cost=cost, symbol=symbol)
+            answer = await self._send(segments, params, api_key, endpoint=endpoint, cost=cost, symbol=symbol)
         finally:
             self._pending -= cost
 
         if answer.status == 404:
             text = self._upstream_text(answer.content)
             self._cache.set(
-                cache_key, endpoint=endpoint, status=404, body=text.encode(), ttl_s=NOT_FOUND_TTL_S
+                cache_key,
+                endpoint=endpoint,
+                status=404,
+                body=text.encode(),
+                ttl_s=min(ttl_s, NOT_FOUND_TTL_S),
             )
             raise self._not_found(endpoint, text)
         if answer.status != 200:
@@ -220,7 +283,7 @@ class EODHDClient:
                 details={"endpoint": endpoint, "bytes": len(answer.content)},
             )
         self._cache.set(cache_key, endpoint=endpoint, status=200, body=answer.content, ttl_s=ttl_s)
-        return ApiResponse(
+        response = ApiResponse(
             endpoint=endpoint,
             status=200,
             data=data,
@@ -229,6 +292,50 @@ class EODHDClient:
             fetched_at=answer.received_at,
             duration_ms=answer.duration_ms,
         )
+        return _Fetched(response, len(answer.content))
+
+    async def _share(
+        self, flight: asyncio.Task[_Fetched], endpoint: str, symbol: str | None, started: float
+    ) -> ApiResponse:
+        """Wait for a request that an identical call has already sent, and answer from it as from the cache.
+
+        The caller is shielded, so cancelling it leaves the request running for the others. A failure is
+        raised again here as a new error with the same content, one for each caller, and it is raised
+        outside the ``except`` block so that it is not chained to the first one.
+        """
+        try:
+            fetched = await asyncio.shield(flight)
+        except GuardError as error:
+            failure = GuardError(error.code, error.message, hint=error.hint, details=error.details)
+        else:
+            return self._served_from(fetched, endpoint, symbol, started)
+        raise failure from None
+
+    def _served_from(
+        self, fetched: _Fetched, endpoint: str, symbol: str | None, started: float
+    ) -> ApiResponse:
+        """The answer of a request that another call sent, counted as a cache hit at no cost."""
+        duration_ms = (time.perf_counter() - started) * 1000
+        self._ledger.record(
+            endpoint=endpoint,
+            cost=0,
+            status=200,
+            cached=True,
+            duration_ms=duration_ms,
+            bytes_=fetched.size,
+            symbol=symbol,
+        )
+        return dataclasses.replace(fetched.response, cached=True, cost=0, duration_ms=duration_ms)
+
+    def _landed(self, cache_key: str, flight: asyncio.Task[_Fetched]) -> None:
+        """Forget a request that has finished or been cancelled.
+
+        A failure is read here, so that one which every caller left before it came is not reported as
+        forgotten when the task is collected.
+        """
+        self._flights.pop(cache_key, None)
+        if not flight.cancelled():
+            flight.exception()
 
     async def get_account(self) -> dict[str, Any]:
         """The account counters from the free ``user`` endpoint; it is never cached or budget-checked.
@@ -250,7 +357,11 @@ class EODHDClient:
         return {name: self._plain(body.get(name)) for name in ACCOUNT_FIELDS}
 
     async def aclose(self) -> None:
-        """Close the HTTP client. The next request opens a new one."""
+        """Cancel the requests still in flight and close the HTTP client. The next request opens a new one."""
+        flights = list(self._flights.values())
+        for flight in flights:
+            flight.cancel()
+        await asyncio.gather(*flights, return_exceptions=True)
         http, self._http = self._http, None
         if http is not None:
             await http.aclose()
@@ -401,9 +512,9 @@ class EODHDClient:
         return redact(text, [self._settings.api_key])[:UPSTREAM_TEXT_LIMIT]
 
     def _plain(self, value: Any) -> str | int | float | bool | None:
-        """Keep a scalar from an answer; anything else becomes None."""
+        """Keep a scalar from an answer, a text masked and cut to 200 characters; anything else is None."""
         if isinstance(value, str):
-            return redact(value, [self._settings.api_key])
+            return clip(redact(value, [self._settings.api_key]))
         if isinstance(value, (bool, int, float)):
             return value
         return None

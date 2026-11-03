@@ -1,7 +1,9 @@
-"""Keep the API key out of messages and logs.
+"""Keep the API key out of messages and logs, and cap the text that comes from the data vendor.
 
 EODHD takes the key as the ``api_token`` query parameter, so every request URL carries it, and
 ``httpx2`` logs request URLs at INFO. Everything that can reach the model or a log passes through here.
+``clip`` is the other half: a name, a holder or a currency in an answer is the vendor's text, and it is
+cut to a set length so that it cannot grow into a message of its own.
 """
 
 from __future__ import annotations
@@ -16,6 +18,9 @@ from urllib.parse import quote, quote_plus
 MASK = "***"
 MIN_SECRET_LENGTH = 6
 """Shorter secrets are ignored: replacing a 3-letter string would garble ordinary text."""
+TEXT_LIMIT = 200
+"""The longest free-text value from the vendor (a name, a holder, a currency) that is passed on whole."""
+_ELLIPSIS = "..."
 
 _KEY_PARAMS = "api_token|apikey|api_key|token"
 _URL_PARAM = re.compile(rf"(?<![\w-])((?:{_KEY_PARAMS})=)[^&\s\"'<>,;)\]}}]+", re.IGNORECASE)
@@ -23,6 +28,13 @@ _QUOTED_PARAM = re.compile(rf"""(["'](?:{_KEY_PARAMS})["']\s*:\s*)(["']).*?\2"""
 
 _QUIET_LOGGERS = ("httpx2", "httpcore2")
 _FILTERED_LOGGERS = ("httpx2", "httpcore2", "mcp")
+
+
+def clip(text: str, limit: int = TEXT_LIMIT) -> str:
+    """``text`` cut to at most ``limit`` characters, ending in ``...`` when something was cut off."""
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - len(_ELLIPSIS), 0)].rstrip() + _ELLIPSIS
 
 
 def _needles(secrets: Iterable[str | None]) -> tuple[str, ...]:
@@ -57,7 +69,7 @@ class RedactingFilter(logging.Filter):
 
     The message is rendered here, so arguments that are not strings (a ``URL`` object in an ``httpx2``
     INFO line) are masked too. A traceback is rendered and masked as well, since the text of a network
-    error carries the request URL.
+    error carries the request URL, and ``exc_info`` is cleared so that no handler can render it again.
     """
 
     def __init__(self, secrets: Iterable[str | None] = ()) -> None:
@@ -82,6 +94,9 @@ class RedactingFilter(logging.Filter):
         record.args = None
         if record.exc_info and not record.exc_text:
             record.exc_text = "".join(traceback.format_exception(*record.exc_info)).rstrip("\n")
+        # Rich's handler builds its traceback from exc_info and ignores exc_text, which would print the
+        # exception as it is. Without exc_info every handler falls back on the masked exc_text.
+        record.exc_info = None
         if record.exc_text:
             record.exc_text = self._scrub(record.exc_text)
         if record.stack_info:

@@ -86,3 +86,31 @@ async def test_a_live_round_trip_catches_the_known_failures(live: tuple[Client, 
     for result in seen:
         assert key not in json.dumps([c.model_dump() for c in result.content])
         assert key not in json.dumps(result.structured_content or {})
+
+
+async def test_a_live_check_of_the_news_tools(live: tuple[Client, str]) -> None:
+    """About 11 API calls: news for a topic (5), sentiment for one symbol (5), the US calendar (1)."""
+    client, key = live
+    seen: list[Any] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await client.call_tool(name, arguments)
+        seen.append(result)
+        return body(result)
+
+    news = await call("get_news", {"topic": "earnings", "max_items": 3})
+    assert news["meta"]["cost"] == 5
+    assert any("third part" in note for note in news["meta"]["notes"])
+
+    sentiment = await call("get_sentiment", {"symbols": ["AAPL.US"]})
+    assert sentiment["meta"]["cost"] == 5
+    assert "SENTIMENT_UNRELIABLE" in [w["code"] for w in sentiment["warnings"]]
+
+    events = await call("get_economic_events", {"country": "US"})
+    assert events["meta"]["cost"] == 1
+    times = [event["datetime_utc"] for event in events["data"]["events"] if event.get("datetime_utc")]
+    assert times == sorted(times)
+
+    for result in seen:
+        assert key not in json.dumps([c.model_dump() for c in result.content])
+        assert key not in json.dumps(result.structured_content or {})

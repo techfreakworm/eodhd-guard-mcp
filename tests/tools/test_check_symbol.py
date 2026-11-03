@@ -18,6 +18,7 @@ from mcp import Client
 from mcp.types import CallToolResult
 
 from eodhd_guard_mcp.config import Settings
+from eodhd_guard_mcp.redact import clip
 from eodhd_guard_mcp.server import Deps, build_deps, build_server
 from tests.helpers import TEST_KEY, FixedClock, MockEODHD, RecordingSleep, load_fixture
 
@@ -160,8 +161,12 @@ async def test_a_frozen_code_is_caught_and_its_successor_is_named(
         }
     ]
     assert data["advice"].startswith("ROG.SW looks frozen: its newest bar is 2026-03-25")
-    assert "Possible successor: ROP.SW (Roche Holding AG, ISIN ZZ0000001002)" in data["advice"]
-    assert "Compare the ISIN and name" in data["advice"]
+    assert (
+        "Possible successor: ROP.SW. Compare its ISIN and name (see successor_candidates)" in data["advice"]
+    )
+    # What the vendor calls the company stays in the data; the sentence holds only the code.
+    assert "Roche Holding AG" not in data["advice"]
+    assert "ZZ0000001002" not in data["advice"]
 
     assert warning_codes(body) == ["STALE_DATA"]
     assert warning(body, "STALE_DATA")["details"]["sessions_behind"] == 158
@@ -297,10 +302,94 @@ async def test_only_the_newest_bar_date_matters_and_unreadable_rows_are_ignored(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     mock_api.add(
-        "eod/ACME.US", [{"date": "2026-11-02"}, {"date": "not a date"}, "junk", {"date": "2026-10-21"}]
+        "eod/ACME.US",
+        [
+            bar("2026-11-02"),
+            {**bar("2026-11-03"), "close": "NA"},
+            {"date": "not a date"},
+            "junk",
+            bar("2026-10-21"),
+        ],
     )
     body = ok(await check(mcp_client, "ACME.US"))
     assert (body["data"]["status"], body["data"]["last_bar_date"]) == ("ok", "2026-11-02")
+
+
+async def test_a_row_with_a_date_and_nothing_else_is_not_a_bar(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    # get_eod_prices reads rows the same way, so the two tools agree on what a bar is.
+    mock_api.add("eod/ACME.US", [bar("2026-10-21"), {"date": "2026-11-02"}])
+    body = ok(await check(mcp_client, "ACME.US", find_successor=False))
+    assert (body["data"]["status"], body["data"]["last_bar_date"]) == ("stale", "2026-10-21")
+
+
+# --- filler bars -------------------------------------------------------------------------------------
+
+
+def filler(day: str) -> dict[str, Any]:
+    """A holiday filler bar: zero volume, and open = high = low = close."""
+    return {
+        "date": day,
+        "open": 40.5,
+        "high": 40.5,
+        "low": 40.5,
+        "close": 40.5,
+        "adjusted_close": 40.5,
+        "volume": 0,
+    }
+
+
+FILLER_TAIL = [
+    bar("2026-10-20"),
+    *(filler(day) for day in ("2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30")),
+]
+
+
+async def test_filler_bars_after_the_last_real_bar_do_not_make_a_dead_code_look_alive(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", FILLER_TAIL)
+    prices = await mcp_client.call_tool("get_eod_prices", {"symbol": "ACME.US", "start": "2026-10-14"})
+    assert prices.structured_content is not None
+    assert "STALE_DATA" in [w["code"] for w in prices.structured_content["warnings"]]
+
+    body = ok(await check(mcp_client, "ACME.US", find_successor=False))
+    data = body["data"]
+    # The same bars give the same verdict in both tools: the newest real bar is 10-20, nine sessions back.
+    assert (data["status"], data["last_bar_date"], data["sessions_behind"]) == ("stale", "2026-10-20", 9)
+    assert warning(body, "STALE_DATA")["details"]["last_bar"] == "2026-10-20"
+    assert "its newest bar is 2026-10-20, 9 sessions behind" in data["advice"]
+    assert "4 filler bars dated after it" in data["advice"]
+
+
+async def test_a_filler_bar_before_a_real_one_changes_nothing(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [bar("2026-10-20"), filler("2026-10-21"), bar("2026-11-02")])
+    body = ok(await check(mcp_client, "ACME.US"))
+    assert (body["data"]["status"], body["data"]["last_bar_date"]) == ("ok", "2026-11-02")
+    assert "filler" not in body["data"]["advice"]
+
+
+async def test_a_window_of_nothing_but_filler_bars_is_a_dead_code(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", [filler("2026-10-29"), filler("2026-10-30")])
+    body = ok(await check(mcp_client, "ACME.US", find_successor=False))
+    data = body["data"]
+    assert (data["status"], data["last_bar_date"], data["sessions_behind"]) == ("stale", None, None)
+    assert (
+        "has no real end-of-day bars from 2026-10-20 to 2026-11-03 (only 2 holiday filler bars)"
+        in data["advice"]
+    )
+    assert "the code looks dead" in data["advice"]
+
+
+async def test_one_filler_bar_is_counted_in_the_singular(mcp_client: Client, mock_api: MockEODHD) -> None:
+    mock_api.add("eod/ACME.US", [bar("2026-10-20"), filler("2026-10-30")])
+    data = ok(await check(mcp_client, "ACME.US", find_successor=False))["data"]
+    assert "1 filler bar dated after it" in data["advice"]
 
 
 async def test_a_second_check_is_free_for_an_hour(
@@ -313,6 +402,91 @@ async def test_a_second_check_is_free_for_an_hour(
     clock.advance(minutes=61)
     ok(await check(mcp_client, "ACME.US"))
     assert mock_api.count("eod/ACME.US") == 2
+
+
+async def test_a_check_is_not_served_a_longer_lived_answer_that_get_eod_prices_stored(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    add_acme(mock_api)
+    # get_eod_prices asks for the same 14 days and keeps its answer for 6 hours.
+    await mcp_client.call_tool("get_eod_prices", {"symbol": "ACME.US", "start": "2026-10-20"})
+    assert mock_api.count("eod/ACME.US") == 1
+    clock.advance(hours=2)
+    body = ok(await check(mcp_client, "ACME.US"))
+    assert body["meta"]["cached"] is False
+    assert mock_api.count("eod/ACME.US") == 2
+
+
+async def test_a_check_is_not_kept_past_the_time_the_next_bar_is_due(
+    mcp_client: Client, mock_api: MockEODHD, clock: FixedClock
+) -> None:
+    clock.advance(hours=6)  # 21:00 UTC; the bar for Tuesday 11-03 is due at 16:30 New York, 21:30 UTC
+    mock_api.add("eod/ACME.US", [bar("2026-10-30"), bar("2026-11-02")], times=1)
+    mock_api.add("eod/ACME.US", [bar("2026-10-30"), bar("2026-11-02"), bar("2026-11-03")])
+    first = ok(await check(mcp_client, "ACME.US"))
+    clock.advance(minutes=29)
+    cached = ok(await check(mcp_client, "ACME.US"))
+    clock.advance(minutes=2)  # 21:31 UTC
+    later = ok(await check(mcp_client, "ACME.US"))
+    assert (first["data"]["last_bar_date"], first["data"]["expected_latest_session"]) == (
+        "2026-11-02",
+        "2026-11-02",
+    )
+    assert cached["meta"]["cached"] is True
+    assert later["meta"]["cached"] is False
+    assert (later["data"]["last_bar_date"], later["data"]["expected_latest_session"]) == (
+        "2026-11-03",
+        "2026-11-03",
+    )
+    assert later["data"]["status"] == "ok"
+
+
+# --- text from the vendor -----------------------------------------------------------------------------
+
+LONG_NAME = "Gone Industries " * 40
+
+
+async def test_a_long_name_is_cut_to_200_characters_with_an_ellipsis_wherever_it_is_returned(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    cut = clip(LONG_NAME.strip())
+    assert 190 < len(cut) <= 200
+    assert cut.endswith("...")
+    mock_api.add("eod/GONE.US", [bar("2026-01-05")])
+    mock_api.add("search/GONE", [hit("GONE", "US", LONG_NAME, "2026-01-05", "ZZ00000000G1")])
+    mock_api.add(f"search/{cut}", [hit("NEWG", "US", LONG_NAME + "2", isin="ZZ00000000G2")])
+    body = ok(await check(mcp_client, "GONE.US"))
+    data = body["data"]
+    assert data["name"] == cut
+    assert [candidate["name"] for candidate in data["successor_candidates"]] == [cut]
+    assert LONG_NAME.strip() not in json.dumps(body)
+
+
+async def test_clashing_names_are_cut_too_and_stay_out_of_the_sentences(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [])
+    mock_api.add(
+        "exchange-symbol-list/US",
+        [listed("GONE", LONG_NAME, exchange="US"), listed("GONE", "Gone Mining Corp", exchange="US")],
+    )
+    data = ok(await check(mcp_client, "GONE.US"))["data"]
+    assert data["clashing_names"] == [clip(LONG_NAME.strip()), "Gone Mining Corp"]
+    assert "Gone" not in data["advice"].replace("GONE", "")
+
+
+async def test_a_code_the_vendor_gives_a_long_candidate_symbol_is_cut_in_the_sentence(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    long_code = "NEW" + "X" * 80
+    mock_api.add("eod/ROG.SW", load_fixture("tools_ref_eod_rog_frozen"))
+    mock_api.add("search/ROG", load_fixture("tools_ref_search_rog"))
+    mock_api.add("search/Roche Holding AG", [hit(long_code, "SW", "Roche Holding AG", isin="ZZ0000001009")])
+    body = ok(await check(mcp_client, "ROG.SW"))
+    assert body["data"]["successor_candidates"][0]["symbol"] == f"{long_code}.SW"
+    assert f"Possible successor: {clip(f'{long_code}.SW', 24)}." in body["data"]["advice"]
+    assert long_code not in body["data"]["advice"]
 
 
 # --- not found ----------------------------------------------------------------------------------------
@@ -367,7 +541,8 @@ async def test_a_not_found_code_is_named_from_the_delisted_list(
         "ZZ00000000G1",
     )
     assert [candidate["symbol"] for candidate in data["successor_candidates"]] == ["GONEX.US"]
-    assert "EODHD's delisted list for US has GONE as 'Gone Industries Inc'." in data["advice"]
+    assert "EODHD's delisted list for US has GONE; its name and ISIN are in name and isin." in data["advice"]
+    assert "Gone Industries Inc" not in data["advice"]
     assert body["meta"]["cost"] == 3
 
 
@@ -402,8 +577,12 @@ async def test_the_line_itself_is_preferred_over_the_same_code_elsewhere(
     body = ok(await check(mcp_client, "GONE.US"))
     assert (body["data"]["name"], body["data"]["isin"]) == ("Gone Industries Inc", "ZZ00000000G3")
     assert body["meta"]["notes"] == []
-    assert "No other code on US with a recent price matches 'Gone Industries Inc'" in body["data"]["advice"]
+    assert (
+        "No other code on US with a recent price matches the name found for this line"
+        in (body["data"]["advice"])
+    )
     assert "try search_symbols with the new name" in body["data"]["advice"]
+    assert "Gone Industries Inc" not in body["data"]["advice"]
     assert mock_api.count("exchange-symbol-list") == 0
 
 
@@ -425,8 +604,9 @@ async def test_a_frozen_line_that_search_no_longer_returns_is_named_from_the_del
         "isin": "ZZ0000001002",
         "previous_close_date": "2026-11-02",
     }
-    assert "EODHD's delisted list for SW has ROG as 'Roche Holding AG'." in data["advice"]
-    assert "Possible successors: ROP.SW (Roche Holding AG, ISIN ZZ0000001002); RO.SW (" in data["advice"]
+    assert "EODHD's delisted list for SW has ROG; its name and ISIN are in name and isin." in data["advice"]
+    assert "Possible successors: ROP.SW, RO.SW. Compare their ISIN and name" in data["advice"]
+    assert "Roche Holding AG" not in data["advice"]
 
     assert [(r.path, r.params.get("exchange"), r.params.get("delisted")) for r in mock_api.requests] == [
         ("eod/ROG.SW", None, None),
@@ -634,9 +814,11 @@ async def test_a_code_the_delisted_list_holds_for_two_companies_is_not_guessed(
     data = body["data"]
     assert (data["name"], data["isin"], data["successor_candidates"]) == (None, None, [])
     assert (
-        "The delisted list for US holds 2 different companies under the code GONE "
-        "('Gone Industries Inc'; 'Gone Mining Corp'), so its name could not be settled." in data["advice"]
+        "The delisted list for US holds 2 different companies under the code GONE, so its name could not "
+        "be settled; they are named in clashing_names." in data["advice"]
     )
+    assert data["clashing_names"] == ["Gone Industries Inc", "Gone Mining Corp"]
+    assert "Gone Mining" not in data["advice"]
     assert data["advice"].endswith("Use search_symbols with the company name.")
     assert mock_api.count("search/") == 1
 
@@ -768,8 +950,7 @@ async def test_candidates_are_other_codes_on_the_same_exchange_with_a_recent_clo
         "NEW5.US",
     ]
     assert (
-        body["data"]["advice"].count("Possible successors: NEW1.US (Gone Industries 1, ISIN ZZ0000000N1);")
-        == 1
+        body["data"]["advice"].count("Possible successors: NEW1.US, NEW2.US, NEW3.US, NEW4.US, NEW5.US.") == 1
     )
 
 
@@ -782,7 +963,8 @@ async def test_a_name_search_that_finds_nothing_new_says_so_without_inventing_a_
     body = ok(await check(mcp_client, "ROG.SW"))
     assert body["data"]["status"] == "stale"
     assert (body["data"]["name"], body["data"]["successor_candidates"]) == ("Roche Holding AG", [])
-    assert "No other code on SW with a recent price matches 'Roche Holding AG'" in body["data"]["advice"]
+    assert "No other code on SW with a recent price matches the name found" in body["data"]["advice"]
+    assert "Roche Holding AG" not in body["data"]["advice"]
     assert body["meta"]["cost"] == 3
     assert mock_api.count("exchange-symbol-list") == 0
 
@@ -1032,7 +1214,9 @@ async def test_a_symbol_without_an_exchange_is_refused_before_any_call(
     assert mock_api.requests == []
 
 
-@pytest.mark.parametrize("answer", [{"message": "unexpected"}, "text", [{"close": 1}, 5]])
+@pytest.mark.parametrize(
+    "answer", [{"message": "unexpected"}, "text", [{"close": 1}, 5], [{"date": "2026-11-02"}]]
+)
 async def test_a_bar_answer_of_the_wrong_shape_is_a_bad_response(
     mcp_client: Client, mock_api: MockEODHD, answer: Any
 ) -> None:
