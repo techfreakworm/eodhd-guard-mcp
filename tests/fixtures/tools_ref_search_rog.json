@@ -1,0 +1,4 @@
+[
+  {"Code": "ROGX", "Exchange": "SW", "Name": "Rogue Systems AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000009001", "isPrimary": true, "previousClose": 18.4, "previousCloseDate": "2026-11-02"},
+  {"Code": "ROG", "Exchange": "SW", "Name": "Roche Holding AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000001001", "isPrimary": true, "previousClose": 251.3, "previousCloseDate": "2026-03-25"}
+]

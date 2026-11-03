@@ -1,0 +1,13 @@
+{
+  "name": "Zelda Fictional-Sentinel",
+  "email": "zelda.sentinel@example.invalid",
+  "subscriptionType": "synthetic-plan",
+  "paymentMethod": "SENTINEL-CARD-4242",
+  "apiRequests": 120,
+  "apiRequestsDate": "2026-11-03",
+  "dailyRateLimit": 100000,
+  "extraLimit": 500,
+  "inviteToken": "SENTINEL-INVITE-7781",
+  "inviteTokenClicked": 1,
+  "subscriptionMode": "synthetic"
+}

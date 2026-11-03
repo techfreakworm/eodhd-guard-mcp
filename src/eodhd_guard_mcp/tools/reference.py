@@ -1,14 +1,1055 @@
-"""Tools: exchanges, symbol lists, search and symbol health. Placeholder until the tools phase lands."""
+"""Tools: exchanges, symbol lists, search and symbol health.
+
+``check_symbol`` answers EODHD's worst silent failure: a code that was renamed or delisted keeps
+answering HTTP 200 with frozen data. The other three tools find codes, and mark the ones that look dead.
+
+The listing endpoints return whole lists, so filtering and paging happen here, on one cached answer:
+asking for a second page costs nothing.
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import math
+from collections import Counter
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
+
+from pydantic import Field
+
+from eodhd_guard_mcp.costs import cost_for
+from eodhd_guard_mcp.coverage import GAPS, CoverageGap, ensure_covered, ensure_exchange_covered, find_gap
+from eodhd_guard_mcp.envelope import ToolResponse, ToolWarning, WarningCode, build_response
+from eodhd_guard_mcp.errors import ErrorCode, GuardError
+from eodhd_guard_mcp.freshness import Freshness, assess, stale_warning
+from eodhd_guard_mcp.markets import expected_latest_session
+from eodhd_guard_mcp.redact import redact
+from eodhd_guard_mcp.tools import READ_ONLY, guarded
+from eodhd_guard_mcp.validation import Symbol, iso_date_or_none, parse_exchange, parse_symbol
 
 if TYPE_CHECKING:
     from mcp.server.mcpserver import MCPServer
 
+    from eodhd_guard_mcp.client import ApiResponse
     from eodhd_guard_mcp.server import Deps
+
+EXCHANGES_TTL_S = 7 * 24 * 3600.0
+SYMBOLS_TTL_S = 24 * 3600.0
+SEARCH_TTL_S = 24 * 3600.0
+CHECK_BARS_TTL_S = 3600.0
+"""A health check should not trust a stale verdict for long, so its bars are cached for an hour."""
+QUOTE_TTL_S = 60.0
+
+CHECK_WINDOW_DAYS = 14
+"""How far back ``check_symbol`` looks for bars."""
+SEARCH_POOL = 50
+"""Rows asked for when ``check_symbol`` searches. They are filtered here, and a call costs the same."""
+MAX_CANDIDATES = 5
+MAX_TYPES_SHOWN = 8
+MAX_SYMBOLS_IN_WARNING = 10
+
+SearchType = Literal["all", "stock", "etf", "fund", "bonds", "index", "crypto"]
+
+LIST_EXCHANGES_DESCRIPTION = (
+    "List the exchanges EODHD knows, with code, country, currency and a coverage note. Costs 1 API call, "
+    "or 0 when cached (the list is kept for 7 days). Tokyo and the UAE have no usable prices and are "
+    "missing or empty, so being listed is not proof of coverage; the result carries PARTIAL_COVERAGE. An "
+    "exchange code is the suffix of a symbol, such as the SW in NESN.SW."
+)
+LIST_EXCHANGE_SYMBOLS_DESCRIPTION = (
+    "List the symbols on one exchange, active or delisted, filtered and paged here. Costs 1 API call for "
+    "the whole list (cached 24 hours), so more pages and other filters on the same exchange and "
+    "delisted flag cost 0. Narrow it with query (words from the code, name or ISIN) and type "
+    "(common_stock, etf, fund, preferred_stock...), and page with max_rows and offset. The only way to "
+    "find a delisted line is delisted=true; the US delisted list has about 60,000 rows."
+)
+SEARCH_SYMBOLS_DESCRIPTION = (
+    "Find symbols by company name or code. Costs 1 API call (cached 24 hours). Each row has the previous "
+    "close and its date, and possibly_inactive marks a line whose previous close is old: it may be "
+    "delisted or renamed, so run check_symbol before relying on it. Delisted lines are not searchable; "
+    "use list_exchange_symbols with delisted=true."
+)
+CHECK_SYMBOL_DESCRIPTION = (
+    "Check whether a symbol is alive, and look for its successor if it is not. EODHD keeps answering "
+    "HTTP 200 with frozen data for delisted or renamed codes, so this compares the newest of the last 14 "
+    "days of bars with the latest session expected. Costs 1 API call, plus 1 for a quote with "
+    "include_quote, plus 2 searches for a successor when the answer is not ok and find_successor is on: "
+    "4 at most, and 0 for Tokyo and the UAE, which EODHD does not cover. Candidates are leads: compare "
+    "the ISIN and name before switching."
+)
+
+T = TypeVar("T")
+
+
+def _text(value: object) -> str | None:
+    """A non-empty string from an upstream field; anything else is None."""
+    if isinstance(value, str):
+        return value.strip() or None
+    return None
+
+
+def _number(value: object) -> float | None:
+    """A finite number from a JSON number or a numeric string; ``"NA"``, booleans and null give None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _first(row: dict[str, Any], *names: str) -> object:
+    """The value of the first of ``names`` present in ``row``; EODHD spells ISIN two ways."""
+    return next((row[name] for name in names if name in row), None)
+
+
+def _given(value: str | None) -> str | None:
+    """None for a missing or blank optional text: models often send an empty string for 'not set'."""
+    return (value or "").strip() or None
+
+
+def _words(text: str | None) -> list[str]:
+    return text.casefold().split() if text else []
+
+
+def _matches(tokens: Sequence[str], *fields: str | None) -> bool:
+    """True when every token is part of the code, name or other field (so word order does not matter)."""
+    haystack = " ".join(value.casefold() for value in fields if value)
+    return all(token in haystack for token in tokens)
+
+
+def _type_key(text: str | None) -> str:
+    """``Common Stock``, ``common-stock`` and ``common_stock`` all become ``common_stock``."""
+    return "_".join((text or "").casefold().replace("-", " ").replace("_", " ").split())
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _clean_query(raw: str) -> str:
+    """Make a search text fit one path segment: a ``/`` becomes a space and runs of blanks collapse."""
+    return " ".join(raw.replace("/", " ").split())
+
+
+def _searchable(text: str) -> bool:
+    """False for a text with nothing to search for; ``.`` and ``..`` are dot segments the client refuses."""
+    return bool(text) and text not in {".", ".."}
+
+
+def _invalid_query(raw: str) -> GuardError:
+    return GuardError(
+        ErrorCode.INVALID_PARAMS,
+        f"query: received {raw[:60]!r}; it holds nothing to search for. "
+        "Accepted: a company name or a code, 1 to 100 characters.",
+        details={"field": "query"},
+    )
+
+
+def _bad_answer(endpoint: str, problem: str) -> GuardError:
+    return GuardError(
+        ErrorCode.BAD_RESPONSE,
+        f"EODHD's {endpoint} answer {problem}.",
+        hint="This is usually temporary; retry later.",
+        details={"endpoint": endpoint},
+    )
+
+
+def _read_rows(body: object, endpoint: str, reader: Callable[[object], T | None]) -> list[T]:
+    """Read every usable row of a list answer.
+
+    An answer that is not a list, or a non-empty list without one readable row, is ``BAD_RESPONSE``: it
+    must not pass for an empty result.
+    """
+    if not isinstance(body, list):
+        raise _bad_answer(endpoint, f"is a {type(body).__name__}, not a list")
+    rows = [row for row in map(reader, body) if row is not None]
+    if body and not rows:
+        raise _bad_answer(endpoint, f"has {len(body)} rows, none of them readable")
+    return rows
+
+
+def _day_or_none(raw: object) -> date | None:
+    return iso_date_or_none(raw.get("date")) if isinstance(raw, dict) else None
+
+
+def _iso(day: date | None) -> str | None:
+    return day.isoformat() if day is not None else None
+
+
+def _now_utc(deps: Deps) -> datetime:
+    return deps.clock().astimezone(timezone.utc)
+
+
+# --- list_exchanges ---------------------------------------------------------------------------------
+
+
+def _coverage_note(gap: CoverageGap) -> str:
+    what = "only earnings dates" if gap.calendar_dates else "no data"
+    return f"EODHD has {what} for the {gap.market} (checked October 2026). Alternatives: {gap.alternatives}"
+
+
+def _read_exchange(raw: object) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    code = _text(raw.get("Code"))
+    if code is None:
+        return None
+    gap = find_gap(code)
+    return {
+        "code": code,
+        "name": _text(raw.get("Name")),
+        "country": _text(raw.get("Country")),
+        "currency": _text(raw.get("Currency")),
+        "operating_mic": _text(raw.get("OperatingMIC")),
+        "country_iso2": _text(raw.get("CountryISO2")),
+        "country_iso3": _text(raw.get("CountryISO3")),
+        "coverage_note": _coverage_note(gap) if gap is not None else None,
+    }
+
+
+def _exchanges_warning(rows: Sequence[dict[str, Any]]) -> ToolWarning:
+    """Always present: Tokyo and the UAE are absent from the list, which is how they would go unseen."""
+    markets = "; ".join(gap.market for gap in GAPS)
+    listed = [row["code"] for row in rows if row["coverage_note"] is not None]
+    return ToolWarning.of(
+        WarningCode.PARTIAL_COVERAGE,
+        f"In checks in October 2026 EODHD had no usable prices or fundamentals for: {markets}. They are "
+        "missing from this list or listed without data (AE is listed but its symbol list is empty), so "
+        "being on this list does not prove an exchange is covered.",
+        listed_without_data=listed,
+    )
+
+
+async def list_exchanges(deps: Deps, query: str | None) -> ToolResponse:
+    """The exchange list with coverage notes, optionally filtered by words in the code, name or country."""
+    response = await deps.client.get(
+        "exchanges-list",
+        endpoint="exchanges-list",
+        cost=cost_for("exchanges-list"),
+        ttl_s=EXCHANGES_TTL_S,
+    )
+    rows = _read_rows(response.data, "exchanges-list", _read_exchange)
+    if not rows:
+        raise GuardError(
+            ErrorCode.NO_DATA,
+            "EODHD answered HTTP 200 with an empty list of exchanges.",
+            hint="This is not normal; retry later.",
+        )
+    query = _given(query)
+    tokens = _words(query)
+    shown = [row for row in rows if _matches(tokens, row["code"], row["name"], row["country"])]
+    warnings = [_exchanges_warning(shown)]
+    if not shown:
+        warnings.append(
+            ToolWarning.of(
+                WarningCode.EMPTY_RESULT,
+                f"No exchange matches {query!r} among the {len(rows)} listed. Try a country name, an "
+                "exchange name or a code.",
+                list_size=len(rows),
+            )
+        )
+    data = {"query": query, "list_size": len(rows), "count": len(shown), "exchanges": shown}
+    return build_response(data, [response], warnings=warnings)
+
+
+# --- list_exchange_symbols --------------------------------------------------------------------------
+
+
+def _read_listed(raw: object, exchange: str) -> dict[str, Any] | None:
+    """One row of an exchange symbol list; ``symbol`` uses the requested exchange, not the row's venue."""
+    if not isinstance(raw, dict):
+        return None
+    code = _text(raw.get("Code"))
+    if code is None:
+        return None
+    code = code.upper()
+    return {
+        "symbol": f"{code}.{exchange}",
+        "code": code,
+        "name": _text(raw.get("Name")),
+        "type": _text(raw.get("Type")),
+        "currency": _text(raw.get("Currency")),
+        "country": _text(raw.get("Country")),
+        "isin": _text(_first(raw, "Isin", "ISIN")),
+        "venue": _text(raw.get("Exchange")),
+    }
+
+
+def _empty_list_error(exchange: str, delisted: bool) -> GuardError:
+    which = "delisted" if delisted else "symbol"
+    return GuardError(
+        ErrorCode.NO_DATA,
+        f"EODHD lists {exchange} but answered HTTP 200 with an empty {which} list.",
+        hint=(
+            "Some exchanges are listed without data (AE is one). list_exchanges shows what EODHD "
+            "lists; search_symbols can still find individual lines."
+        ),
+        details={"exchange": exchange, "delisted": delisted},
+    )
+
+
+def _types_present(rows: Sequence[dict[str, Any]]) -> str:
+    counts = Counter(_type_key(row["type"]) or "unknown" for row in rows)
+    return ", ".join(f"{name} ({count})" for name, count in counts.most_common(MAX_TYPES_SHOWN))
+
+
+def _no_match_warning(
+    exchange: str, query: str | None, kind: str | None, rows: Sequence[dict[str, Any]]
+) -> ToolWarning:
+    filters = " and ".join(
+        part for part in (f"query {query!r}" if query else "", f"type {kind!r}" if kind else "") if part
+    )
+    message = f"No symbol on {exchange} matches {filters}; the list holds {len(rows)} symbols."
+    if kind:
+        message += f" Types on this list: {_types_present(rows)}."
+    return ToolWarning.of(WarningCode.EMPTY_RESULT, message, list_size=len(rows))
+
+
+def _page_warning(total: int, count: int, offset: int) -> ToolWarning:
+    after = offset + count
+    return ToolWarning.of(
+        WarningCode.TRUNCATED,
+        f"{total} symbols match; {count} are shown, from position {offset}. Pass offset={after} for the "
+        "next page, or narrow the list with query and type.",
+        total=total,
+        returned=count,
+        offset=offset,
+        next_offset=after,
+    )
+
+
+async def list_exchange_symbols(
+    deps: Deps,
+    exchange: str,
+    query: str | None,
+    kind: str | None,
+    delisted: bool,
+    max_rows: int,
+    offset: int,
+) -> ToolResponse:
+    """One exchange's symbol list, filtered by query and type and cut into pages here."""
+    code = parse_exchange(exchange)
+    query, kind = _given(query), _given(kind)
+    ensure_exchange_covered(code, "symbols", allow_uncovered=deps.settings.allow_uncovered)
+    try:
+        response = await deps.client.get(
+            f"exchange-symbol-list/{code}",
+            {"delisted": 1 if delisted else None},
+            endpoint="exchange-symbol-list",
+            cost=cost_for("exchange-symbol-list"),
+            ttl_s=SYMBOLS_TTL_S,
+        )
+    except GuardError as exc:
+        if exc.code is not ErrorCode.NOT_FOUND:
+            raise
+        raise GuardError(
+            ErrorCode.NOT_FOUND,
+            exc.message,
+            hint="list_exchanges shows the exchange codes EODHD knows.",
+            details=exc.details,
+        ) from None
+    rows = _read_rows(response.data, "exchange-symbol-list", lambda raw: _read_listed(raw, code))
+    if not rows:
+        raise _empty_list_error(code, delisted)
+
+    tokens = _words(query)
+    wanted = _type_key(kind)
+    matched = [
+        row
+        for row in rows
+        if (not wanted or _type_key(row["type"]) == wanted)
+        and _matches(tokens, row["code"], row["name"], row["isin"])
+    ]
+    page = matched[offset : offset + max_rows]
+    warnings: list[ToolWarning] = []
+    if not matched:
+        warnings.append(_no_match_warning(code, query, kind, rows))
+    elif not page:
+        warnings.append(
+            ToolWarning.of(
+                WarningCode.EMPTY_RESULT,
+                f"offset {offset} is past the last of the {len(matched)} matching symbols.",
+                total=len(matched),
+            )
+        )
+    elif offset + len(page) < len(matched):
+        warnings.append(_page_warning(len(matched), len(page), offset))
+    next_offset = offset + len(page) if offset + len(page) < len(matched) else None
+    data = {
+        "exchange": code,
+        "delisted": delisted,
+        "query": query,
+        "type": kind,
+        "list_size": len(rows),
+        "total": len(matched),
+        "offset": offset,
+        "count": len(page),
+        "next_offset": next_offset,
+        "symbols": page,
+    }
+    notes = [
+        "Filtering and paging run here on one cached list: more pages and other filters for this exchange "
+        "cost 0 until the cache expires (24 hours)."
+    ]
+    return build_response(data, [response], warnings=warnings, notes=notes)
+
+
+# --- search_symbols ---------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Hit:
+    """One row of a search answer."""
+
+    code: str
+    exchange: str
+    name: str | None
+    kind: str | None
+    country: str | None
+    currency: str | None
+    isin: str | None
+    is_primary: bool | None
+    previous_close: float | None
+    previous_close_date: date | None
+
+    @property
+    def symbol(self) -> str:
+        return f"{self.code}.{self.exchange}"
+
+
+def _read_hit(raw: object) -> _Hit | None:
+    if not isinstance(raw, dict):
+        return None
+    code, exchange = _text(raw.get("Code")), _text(raw.get("Exchange"))
+    if code is None or exchange is None:
+        return None
+    primary = raw.get("isPrimary")
+    return _Hit(
+        code=code.upper(),
+        exchange=exchange.upper(),
+        name=_text(raw.get("Name")),
+        kind=_text(raw.get("Type")),
+        country=_text(raw.get("Country")),
+        currency=_text(raw.get("Currency")),
+        isin=_text(_first(raw, "ISIN", "Isin")),
+        is_primary=primary if isinstance(primary, bool) else None,
+        previous_close=_number(raw.get("previousClose")),
+        previous_close_date=iso_date_or_none(raw.get("previousCloseDate")),
+    )
+
+
+async def _search(
+    deps: Deps,
+    query: str,
+    *,
+    exchange: str | None,
+    kind: str | None,
+    limit: int,
+    tag: str | None,
+    responses: list[ApiResponse],
+) -> list[_Hit]:
+    """One ``search/{query}`` call. The answer is added to ``responses``; its readable rows are returned."""
+    response = await deps.client.get(
+        f"search/{query}",
+        {"limit": limit, "exchange": exchange, "type": kind},
+        endpoint="search",
+        cost=cost_for("search"),
+        ttl_s=SEARCH_TTL_S,
+        symbol=tag,
+    )
+    responses.append(response)
+    return _read_rows(response.data, "search", _read_hit)
+
+
+def _is_inactive(deps: Deps, hit: _Hit, now: datetime) -> bool:
+    """No previous close, or one that is ``stale_sessions`` or more sessions old: no sign the line trades."""
+    return assess(hit.exchange, hit.previous_close_date, now, threshold=deps.settings.stale_sessions).stale
+
+
+def _hit_row(hit: _Hit, inactive: bool) -> dict[str, Any]:
+    return {
+        "symbol": hit.symbol,
+        "code": hit.code,
+        "exchange": hit.exchange,
+        "name": hit.name,
+        "type": hit.kind,
+        "country": hit.country,
+        "currency": hit.currency,
+        "isin": hit.isin,
+        "is_primary": hit.is_primary,
+        "previous_close": hit.previous_close,
+        "previous_close_date": _iso(hit.previous_close_date),
+        "possibly_inactive": inactive,
+    }
+
+
+def _listing(symbols: Sequence[str]) -> str:
+    shown = ", ".join(symbols[:MAX_SYMBOLS_IN_WARNING])
+    return shown + (
+        f" and {len(symbols) - MAX_SYMBOLS_IN_WARNING} more" if len(symbols) > MAX_SYMBOLS_IN_WARNING else ""
+    )
+
+
+def _inactive_warning(threshold: int, symbols: Sequence[str]) -> ToolWarning:
+    return ToolWarning.of(
+        WarningCode.POSSIBLY_INACTIVE,
+        f"No recent previous close for {_listing(symbols)}: the date is missing or {threshold} or more "
+        "sessions behind the latest session expected for the exchange. A line like that may be delisted, "
+        "renamed or suspended; run check_symbol on the one you need.",
+        symbols=list(symbols),
+        threshold=threshold,
+    )
+
+
+def _partial_coverage_warning(hits: Sequence[_Hit]) -> ToolWarning:
+    markets = sorted({gap.market for hit in hits if (gap := find_gap(hit.exchange)) is not None})
+    symbols = [hit.symbol for hit in hits]
+    return ToolWarning.of(
+        WarningCode.PARTIAL_COVERAGE,
+        f"Found on exchanges where EODHD has no usable prices ({'; '.join(markets)}): "
+        f"{_listing(symbols)}. A search hit does not mean data exists; check_symbol names the alternatives.",
+        symbols=symbols,
+        markets=markets,
+    )
+
+
+async def search_symbols(
+    deps: Deps, query: str, exchange: str | None, kind: SearchType, max_results: int
+) -> ToolResponse:
+    """Search by name or code; each row says whether the line still seems to trade."""
+    text = _clean_query(query)
+    if not _searchable(text):
+        raise _invalid_query(query)
+    given = _given(exchange)
+    venue = parse_exchange(given) if given is not None else None
+    responses: list[ApiResponse] = []
+    hits = await _search(
+        deps,
+        text,
+        exchange=venue,
+        kind=None if kind == "all" else kind,
+        limit=max_results,
+        tag=None,
+        responses=responses,
+    )
+    warnings: list[ToolWarning] = []
+    if len(hits) > max_results:
+        warnings.append(
+            ToolWarning.of(
+                WarningCode.TRUNCATED,
+                f"EODHD returned {len(hits)} rows for a limit of {max_results}; the first {max_results} "
+                "are shown.",
+                returned=len(hits),
+                limit=max_results,
+            )
+        )
+        hits = hits[:max_results]
+    if not hits:
+        where = f" on {venue}" if venue else ""
+        warnings.append(
+            ToolWarning.of(
+                WarningCode.EMPTY_RESULT,
+                f"No listed symbol matches {text!r}{where}. Delisted lines are not searchable: try "
+                "list_exchange_symbols with delisted=true, or check the spelling and try a shorter name.",
+            )
+        )
+    now = _now_utc(deps)
+    checked = [(hit, _is_inactive(deps, hit, now)) for hit in hits]
+    flagged = [hit.symbol for hit, dead in checked if dead]
+    if flagged:
+        warnings.append(_inactive_warning(deps.settings.stale_sessions, flagged))
+    uncovered = [hit for hit in hits if find_gap(hit.exchange) is not None]
+    if uncovered:
+        warnings.append(_partial_coverage_warning(uncovered))
+    data = {
+        "query": text,
+        "exchange": venue,
+        "type": kind,
+        "count": len(hits),
+        "results": [_hit_row(hit, dead) for hit, dead in checked],
+    }
+    notes = ["Delisted lines are not searchable; list_exchange_symbols with delisted=true lists them."]
+    return build_response(data, responses, warnings=warnings, notes=notes)
+
+
+# --- check_symbol -----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Bars:
+    """What the end-of-day probe found. ``found`` is False after a 404."""
+
+    found: bool
+    last_bar: date | None = None
+    response: ApiResponse | None = None
+
+
+@dataclass(frozen=True)
+class _QuoteProbe:
+    """``status`` is ok, no_quote (``"NA"`` fields), missing (404) or error (the call failed)."""
+
+    status: str
+    response: ApiResponse | None = None
+    error: str | None = None
+
+
+@dataclass
+class _Successors:
+    """What the two searches found. ``searched`` is False when they were not run."""
+
+    searched: bool = False
+    name: str | None = None
+    isin: str | None = None
+    borrowed_from: str | None = None
+    """Set when the name comes from a line with the same code on another exchange."""
+    candidates: list[dict[str, Any]] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class _Case:
+    """Everything the advice is written from."""
+
+    symbol: Symbol
+    status: str
+    freshness: Freshness
+    window: tuple[date, date]
+    quote: _QuoteProbe | None
+    successors: _Successors
+
+
+def _brief(exc: GuardError, deps: Deps) -> str:
+    """An error as one line for the advice, with the key masked."""
+    return redact(f"{exc.code.value}: {exc.message}", [deps.settings.api_key])
+
+
+async def _probe_bars(deps: Deps, symbol: Symbol, window: tuple[date, date]) -> _Bars:
+    """The last 14 days of daily bars. A 404 is a finding; any other failure is raised."""
+    start, end = window
+    try:
+        response = await deps.client.get(
+            f"eod/{symbol.full}",
+            {"from": start.isoformat(), "to": end.isoformat(), "period": "d", "order": "a"},
+            endpoint="eod",
+            cost=cost_for("eod"),
+            ttl_s=CHECK_BARS_TTL_S,
+            symbol=symbol.full,
+        )
+    except GuardError as exc:
+        if exc.code is ErrorCode.NOT_FOUND:
+            return _Bars(found=False)
+        raise
+    days = _read_rows(response.data, "eod", _day_or_none)
+    return _Bars(found=True, last_bar=max(days, default=None), response=response)
+
+
+async def _probe_quote(deps: Deps, symbol: Symbol) -> _QuoteProbe:
+    """A real-time quote counts only with a price and a timestamp: ``"NA"`` is not a quote."""
+    try:
+        response = await deps.client.get(
+            f"real-time/{symbol.full}",
+            endpoint="real-time",
+            cost=cost_for("real-time"),
+            ttl_s=QUOTE_TTL_S,
+            symbol=symbol.full,
+        )
+    except GuardError as exc:
+        if exc.code is ErrorCode.NOT_FOUND:
+            return _QuoteProbe("missing")
+        return _QuoteProbe("error", error=_brief(exc, deps))
+    body = response.data[0] if isinstance(response.data, list) and response.data else response.data
+    stamp = _number(body.get("timestamp")) if isinstance(body, dict) else None
+    usable = stamp is not None and stamp > 0 and _number(body.get("close")) is not None
+    return _QuoteProbe("ok" if usable else "no_quote", response)
+
+
+def _pick_line(hits: Sequence[_Hit], symbol: Symbol) -> _Hit | None:
+    """The row for this very line, else a row with the same code on another exchange that has a name."""
+    exact = next((h for h in hits if h.code == symbol.code and h.exchange == symbol.exchange), None)
+    if exact is not None:
+        return exact
+    return next((h for h in hits if h.code == symbol.code and h.name), None)
+
+
+def _candidates(deps: Deps, hits: Sequence[_Hit], symbol: Symbol, now: datetime) -> list[dict[str, Any]]:
+    """Other codes on the same exchange whose previous close is recent: lines the company may continue as."""
+    found: dict[str, dict[str, Any]] = {}
+    for hit in hits:
+        if hit.exchange != symbol.exchange or hit.code == symbol.code or hit.symbol in found:
+            continue
+        if _is_inactive(deps, hit, now):
+            continue
+        found[hit.symbol] = {
+            "symbol": hit.symbol,
+            "name": hit.name,
+            "isin": hit.isin,
+            "previous_close_date": _iso(hit.previous_close_date),
+        }
+        if len(found) == MAX_CANDIDATES:
+            break
+    return list(found.values())
+
+
+async def _find_successors(
+    deps: Deps, symbol: Symbol, now: datetime, responses: list[ApiResponse]
+) -> _Successors:
+    """Look the line up by code for its name, then search that name on the same exchange.
+
+    A failure ends the search but keeps what was found, so the verdict already paid for is not lost.
+    """
+    result = _Successors(searched=True)
+    try:
+        by_code = await _search(
+            deps,
+            symbol.code,
+            exchange=None,
+            kind=None,
+            limit=SEARCH_POOL,
+            tag=symbol.full,
+            responses=responses,
+        )
+        line = _pick_line(by_code, symbol)
+        if line is None or line.name is None:
+            return result
+        name = _clean_query(line.name)
+        if not _searchable(name):
+            return result
+        result.name, result.isin = line.name, line.isin
+        if line.symbol != symbol.full:
+            result.borrowed_from = line.symbol
+        by_name = await _search(
+            deps,
+            name,
+            exchange=symbol.exchange,
+            kind=None,
+            limit=SEARCH_POOL,
+            tag=symbol.full,
+            responses=responses,
+        )
+    except GuardError as exc:
+        result.error = _brief(exc, deps)
+        return result
+    result.candidates = _candidates(deps, by_name, symbol, now)
+    return result
+
+
+def _status(bars: _Bars, freshness: Freshness, quote: _QuoteProbe | None) -> str:
+    """Precedence: not_found, stale, no_quote, ok. ``quote_status`` keeps what the status hides."""
+    if not bars.found:
+        return "not_found"
+    if freshness.stale:
+        return "stale"
+    if quote is not None and quote.status in {"no_quote", "missing"}:
+        return "no_quote"
+    return "ok"
+
+
+def _finding(case: _Case) -> str:
+    name, fr = case.symbol.full, case.freshness
+    if case.status == "not_found":
+        return f"EODHD does not know {name}: the end-of-day endpoint answered 404."
+    if case.status == "stale" and fr.last_bar is None:
+        start, end = case.window
+        return (
+            f"{name} has no end-of-day bars from {start} to {end}, although a bar for "
+            f"{fr.expected_latest} should exist: the code looks dead."
+        )
+    behind = _plural(fr.sessions_behind, "session")
+    if case.status == "stale":
+        return (
+            f"{name} looks frozen: its newest bar is {fr.last_bar}, {behind} behind the latest "
+            f"expected ({fr.expected_latest})."
+        )
+    if case.status == "no_quote":
+        return (
+            f"{name} has current end-of-day bars (newest {fr.last_bar}) but no real-time quote: EODHD "
+            "has none for it, which is normal for some funds and indices. Use get_eod_prices."
+        )
+    if fr.sessions_behind == 0:
+        return f"{name} looks alive: the newest bar ({fr.last_bar}) is the latest session expected by now."
+    return (
+        f"{name} looks alive: the newest bar is {fr.last_bar}, {behind} behind the latest expected "
+        f"({fr.expected_latest}), within the normal delay."
+    )
+
+
+def _describe_candidate(candidate: dict[str, Any]) -> str:
+    details = [candidate["name"], f"ISIN {candidate['isin']}" if candidate["isin"] else None]
+    shown = ", ".join(part for part in details if part)
+    return f"{candidate['symbol']} ({shown})" if shown else str(candidate["symbol"])
+
+
+def _next_step(case: _Case) -> str:
+    found = case.successors
+    if found.candidates:
+        listing = "; ".join(_describe_candidate(c) for c in found.candidates)
+        label = "Possible successors" if len(found.candidates) > 1 else "Possible successor"
+        return f"{label}: {listing}. Compare the ISIN and name with this line before switching."
+    if case.status in {"ok", "no_quote"}:
+        return ""
+    if found.error:
+        return (
+            f"The successor search stopped early ({found.error}). Use search_symbols with the company name."
+        )
+    if not found.searched:
+        return (
+            "To look for the right code, run check_symbol with find_successor=true, or use "
+            "search_symbols with the company name."
+        )
+    if found.name is None:
+        return (
+            "The company could not be found by its code, so there was nothing to search by name. Use "
+            "search_symbols with the company name."
+        )
+    return (
+        f"No other code on {case.symbol.exchange} with a recent price matches {found.name!r}. A delisted "
+        "line appears only in list_exchange_symbols with delisted=true; a company that changed its name "
+        "needs search_symbols with the new name."
+    )
+
+
+def _advice(case: _Case) -> str:
+    parts = [_finding(case)]
+    if case.quote is not None and case.quote.status == "error":
+        parts.append(f"The quote check failed ({case.quote.error}).")
+    parts.append(_next_step(case))
+    return " ".join(part for part in parts if part)
+
+
+def _quote_warning(symbol: Symbol, quote: _QuoteProbe) -> ToolWarning:
+    answer = "answered NA" if quote.status == "no_quote" else "answered HTTP 404"
+    return ToolWarning.of(
+        WarningCode.NO_QUOTE,
+        f"EODHD has no usable real-time quote for {symbol.full} (it {answer}). The code may be unknown, "
+        "delisted or renamed; funds and some indices have no real-time feed at all.",
+        symbol=symbol.full,
+        quote_status=quote.status,
+    )
+
+
+def _not_covered(symbol: Symbol, now: datetime, refusal: GuardError) -> ToolResponse:
+    """The verdict for a market EODHD does not cover. No call is made, so nothing is spent."""
+    market = refusal.details.get("market", "this market")
+    data: dict[str, Any] = {
+        "symbol": symbol.full,
+        "status": "not_covered",
+        "last_bar_date": None,
+        "expected_latest_session": expected_latest_session(symbol.exchange, now).isoformat(),
+        "sessions_behind": None,
+        "quote_status": None,
+        "name": None,
+        "isin": None,
+        "successor_candidates": [],
+        "advice": (
+            f"{symbol.full} is on the {market}, which EODHD does not cover, so nothing was looked up and "
+            f"nothing was spent. {refusal.hint or ''}"
+        ).strip(),
+    }
+    warning = ToolWarning.of(
+        WarningCode.NOT_COVERED,
+        f"{refusal.message} {refusal.hint or ''}".strip(),
+        **refusal.details,
+    )
+    return build_response(data, [], warnings=[warning])
+
+
+async def check_symbol(
+    deps: Deps, raw_symbol: str, include_quote: bool, find_successor: bool
+) -> ToolResponse:
+    """Is this code alive? Compare its newest bar with the expected session, and look for a successor."""
+    symbol = parse_symbol(raw_symbol)
+    now = _now_utc(deps)
+    try:
+        ensure_covered(symbol, "prices", allow_uncovered=deps.settings.allow_uncovered)
+    except GuardError as refusal:
+        return _not_covered(symbol, now, refusal)
+
+    today = now.date()
+    window = (today - timedelta(days=CHECK_WINDOW_DAYS), today)
+    bars = await _probe_bars(deps, symbol, window)
+    responses: list[ApiResponse] = [bars.response] if bars.response is not None else []
+    quote = await _probe_quote(deps, symbol) if include_quote else None
+    if quote is not None and quote.response is not None:
+        responses.append(quote.response)
+
+    freshness = assess(symbol.exchange, bars.last_bar, now, threshold=deps.settings.stale_sessions)
+    status = _status(bars, freshness, quote)
+    successors = _Successors()
+    if status != "ok" and find_successor:
+        successors = await _find_successors(deps, symbol, now, responses)
+
+    case = _Case(symbol, status, freshness, window, quote, successors)
+    data = {
+        "symbol": symbol.full,
+        "status": status,
+        "last_bar_date": _iso(bars.last_bar),
+        "expected_latest_session": freshness.expected_latest.isoformat(),
+        "sessions_behind": freshness.sessions_behind if bars.last_bar is not None else None,
+        "quote_status": quote.status if quote is not None else None,
+        "name": successors.name,
+        "isin": successors.isin,
+        "successor_candidates": successors.candidates,
+        "advice": _advice(case),
+    }
+    warnings: list[ToolWarning] = []
+    notes: list[str] = []
+    if status == "stale":
+        warnings.append(stale_warning(symbol, freshness))
+        notes.append(
+            "Freshness is judged on the exchange's weekday calendar. Holidays are not modelled, so a "
+            "closure of several days can look stale."
+        )
+    if quote is not None and quote.status in {"no_quote", "missing"}:
+        warnings.append(_quote_warning(symbol, quote))
+    if successors.borrowed_from:
+        notes.append(
+            f"The name and ISIN come from {successors.borrowed_from}, a line with the same code on another "
+            "exchange; confirm it is the same company."
+        )
+    return build_response(data, responses, warnings=warnings, notes=notes)
+
+
+# --- registration -----------------------------------------------------------------------------------
 
 
 def register(server: MCPServer, deps: Deps) -> None:
-    """Register this module's tools. Nothing yet."""
+    """Register list_exchanges, list_exchange_symbols, search_symbols and check_symbol."""
+
+    @server.tool(
+        name="list_exchanges",
+        title="List exchanges",
+        description=LIST_EXCHANGES_DESCRIPTION,
+        annotations=READ_ONLY,
+    )
+    @guarded(deps)
+    async def list_exchanges_tool(
+        query: Annotated[
+            str | None,
+            Field(
+                max_length=100,
+                description=(
+                    "Words to look for in the exchange code, name or country, for example 'india' or "
+                    "'swiss'. Every word must match. Leave out to list all exchanges."
+                ),
+            ),
+        ] = None,
+    ) -> ToolResponse:
+        return await list_exchanges(deps, query)
+
+    @server.tool(
+        name="list_exchange_symbols",
+        title="List exchange symbols",
+        description=LIST_EXCHANGE_SYMBOLS_DESCRIPTION,
+        annotations=READ_ONLY,
+    )
+    @guarded(deps)
+    async def list_exchange_symbols_tool(
+        exchange: Annotated[
+            str,
+            Field(
+                max_length=10,
+                description="Exchange code as in a symbol's suffix, for example US, LSE, SW or NSE.",
+            ),
+        ],
+        query: Annotated[
+            str | None,
+            Field(
+                max_length=100,
+                description=(
+                    "Words to look for in the code, name or ISIN, in any order, for example 'nestle'. "
+                    "Leave out for no filter."
+                ),
+            ),
+        ] = None,
+        type: Annotated[
+            str | None,
+            Field(
+                max_length=30,
+                description=(
+                    "Only this type of instrument, matched ignoring case with spaces written as "
+                    "underscores: common_stock, etf, fund, preferred_stock, mutual_fund, index and so on. "
+                    "Leave out for all types."
+                ),
+            ),
+        ] = None,
+        delisted: Annotated[
+            bool,
+            Field(description="True lists delisted lines instead of active ones. Search never finds them."),
+        ] = False,
+        max_rows: Annotated[
+            int,
+            Field(ge=1, le=500, description="Rows per page, 1 to 500. TRUNCATED reports the total."),
+        ] = 100,
+        offset: Annotated[
+            int,
+            Field(ge=0, le=1_000_000, description="Position of the first row of the page, to page on."),
+        ] = 0,
+    ) -> ToolResponse:
+        return await list_exchange_symbols(deps, exchange, query, type, delisted, max_rows, offset)
+
+    @server.tool(
+        name="search_symbols",
+        title="Search symbols",
+        description=SEARCH_SYMBOLS_DESCRIPTION,
+        annotations=READ_ONLY,
+    )
+    @guarded(deps)
+    async def search_symbols_tool(
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                max_length=100,
+                description=(
+                    "A company name or a code, such as 'Acme Corp' or 'ACME'. A '/' is read as a space."
+                ),
+            ),
+        ],
+        exchange: Annotated[
+            str | None,
+            Field(
+                max_length=10,
+                description="Only lines on this exchange, for example SW or LSE. Leave out to search all.",
+            ),
+        ] = None,
+        type: Annotated[
+            SearchType,
+            Field(description="Kind of instrument: all, stock, etf, fund, bonds, index or crypto."),
+        ] = "all",
+        max_results: Annotated[int, Field(ge=1, le=50, description="Most rows to return, 1 to 50.")] = 15,
+    ) -> ToolResponse:
+        return await search_symbols(deps, query, exchange, type, max_results)
+
+    @server.tool(
+        name="check_symbol",
+        title="Check symbol",
+        description=CHECK_SYMBOL_DESCRIPTION,
+        annotations=READ_ONLY,
+    )
+    @guarded(deps)
+    async def check_symbol_tool(
+        symbol: Annotated[
+            str,
+            Field(
+                max_length=40,
+                description="The symbol to check, as CODE.EXCHANGE, for example ROG.SW.",
+            ),
+        ],
+        include_quote: Annotated[
+            bool,
+            Field(description="Also ask for a real-time quote (1 more API call); 'NA' fields mean no_quote."),
+        ] = False,
+        find_successor: Annotated[
+            bool,
+            Field(
+                description=(
+                    "When the code looks dead, search by code and then by company name for a successor "
+                    "(up to 2 more API calls)."
+                )
+            ),
+        ] = True,
+    ) -> ToolResponse:
+        return await check_symbol(deps, symbol, include_quote, find_successor)

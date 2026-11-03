@@ -1,0 +1,5 @@
+[
+  {"date": "2026-03-23", "open": 250.1, "high": 253.4, "low": 249.2, "close": 252.0, "adjusted_close": 252.0, "volume": 410200},
+  {"date": "2026-03-24", "open": 252.0, "high": 254.9, "low": 251.1, "close": 253.7, "adjusted_close": 253.7, "volume": 388900},
+  {"date": "2026-03-25", "open": 253.7, "high": 255.0, "low": 252.2, "close": 251.3, "adjusted_close": 251.3, "volume": 402500}
+]

@@ -1,0 +1,8 @@
+[
+  {"Code": "ACX", "Name": "Acme Exchange", "Country": "Freedonia", "Currency": "FDD", "OperatingMIC": "XACX", "CountryISO2": "FD", "CountryISO3": "FDN"},
+  {"Code": "UMB", "Name": "Umbrella Securities Market", "Country": "Freedonia", "Currency": "FDD", "OperatingMIC": "XUMB", "CountryISO2": "FD", "CountryISO3": "FDN"},
+  {"Code": "GLX", "Name": "Globex Stock Exchange", "Country": "Sylvania", "Currency": "SYK", "OperatingMIC": "XGLX", "CountryISO2": "SY", "CountryISO3": "SYL"},
+  {"Code": "INI", "Name": "Initech Bourse", "Country": "Sylvania", "Currency": "SYK", "OperatingMIC": "XINI", "CountryISO2": "SY", "CountryISO3": "SYL"},
+  {"Code": "TSE", "Name": "Tokyo Stock Exchange", "Country": "Japan", "Currency": "JPY", "OperatingMIC": "XTKS", "CountryISO2": "JP", "CountryISO3": "JPN"},
+  {"Code": "AE", "Name": "Emirates Placeholder Market", "Country": "UAE", "Currency": "AED", "OperatingMIC": "XAEP", "CountryISO2": "AE", "CountryISO3": "ARE"}
+]

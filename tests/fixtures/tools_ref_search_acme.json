@@ -1,0 +1,8 @@
+[
+  {"Code": "ACME", "Exchange": "US", "Name": "Acme Corp", "Type": "Common Stock", "Country": "USA", "Currency": "USD", "ISIN": "ZZ0000000001", "isPrimary": true, "previousClose": 41.8, "previousCloseDate": "2026-11-02"},
+  {"Code": "ACME", "Exchange": "XETRA", "Name": "Acme Corp", "Type": "Common Stock", "Country": "Germany", "Currency": "EUR", "ISIN": "ZZ0000000001", "isPrimary": false, "previousClose": 36, "previousCloseDate": "2026-11-02"},
+  {"Code": "ACMEOLD", "Exchange": "US", "Name": "Acme Corp Legacy Line", "Type": "Common Stock", "Country": "USA", "Currency": "USD", "ISIN": null, "isPrimary": false, "previousClose": 3.2, "previousCloseDate": "2026-09-30"},
+  {"Code": "ACME", "Exchange": "LSE", "Name": "Acme Corp", "Type": "Common Stock", "Country": "UK", "Currency": "GBX", "ISIN": "ZZ0000000001", "isPrimary": false, "previousClose": 3150, "previousCloseDate": "0000-00-00"},
+  {"Code": "ACMEJP", "Exchange": "TSE", "Name": "Acme Japan KK", "Type": "Common Stock", "Country": "Japan", "Currency": "JPY", "ISIN": "ZZ0000000009", "isPrimary": true, "previousClose": 1204, "previousCloseDate": "2026-11-02"},
+  {"Name": "A row without a code or an exchange", "Type": "Common Stock"}
+]

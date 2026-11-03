@@ -1,0 +1,5 @@
+[
+  {"Code": "OLDCO", "Name": "Oldco Holdings", "Country": "USA", "Exchange": "NYSE", "Currency": "USD", "Type": "Common Stock", "Isin": "ZZ0000090001"},
+  {"Code": "BYGN", "Name": "Bygone Rail", "Country": "USA", "Exchange": "NASDAQ", "Currency": "USD", "Type": "Common Stock", "Isin": "ZZ0000090002"},
+  {"Code": "VNSH", "Name": "Vanished Foods", "Country": "USA", "Exchange": "PINK", "Currency": "USD", "Type": "Common Stock", "Isin": null}
+]
