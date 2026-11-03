@@ -1,0 +1,20 @@
+[
+  {"date": "2026-03-02", "open": 251.7, "high": 260.74, "low": 250.95, "close": 257.56, "adjusted_close": 249.8332, "volume": 1202500},
+  {"date": "2026-03-03", "open": 257.25, "high": 258.77, "low": 256.17, "close": 257.88, "adjusted_close": 250.1436, "volume": 1428300},
+  {"date": "2026-03-04", "open": 255.94, "high": 260.89, "low": 255.12, "close": 257.69, "adjusted_close": 249.9593, "volume": 1516300},
+  {"date": "2026-03-05", "open": 257.37, "high": 260.48, "low": 255.79, "close": 257.78, "adjusted_close": 250.0466, "volume": 794200},
+  {"date": "2026-03-06", "open": 256.6, "high": 258.21, "low": 250.02, "close": 251.04, "adjusted_close": 243.5088, "volume": 1053900},
+  {"date": "2026-03-09", "open": 252.92, "high": 255.7, "low": 249.84, "close": 251.45, "adjusted_close": 243.9065, "volume": 1160800},
+  {"date": "2026-03-10", "open": 252.09, "high": 252.85, "low": 248.1, "close": 250.02, "adjusted_close": 242.5194, "volume": 1491400},
+  {"date": "2026-03-11", "open": 250.38, "high": 252.81, "low": 248.92, "close": 249.97, "adjusted_close": 242.4709, "volume": 992500},
+  {"date": "2026-03-12", "open": 250.1, "high": 254.58, "low": 247.85, "close": 252.52, "adjusted_close": 244.9444, "volume": 834800},
+  {"date": "2026-03-13", "open": 250.91, "high": 252.24, "low": 243.18, "close": 245.4, "adjusted_close": 238.038, "volume": 1241900},
+  {"date": "2026-03-16", "open": 243.84, "high": 251.22, "low": 240.66, "close": 249.09, "adjusted_close": 241.6173, "volume": 1445000},
+  {"date": "2026-03-17", "open": 249.29, "high": 250.11, "low": 243.67, "close": 246.52, "adjusted_close": 239.1244, "volume": 1507700},
+  {"date": "2026-03-18", "open": 245.47, "high": 249.55, "low": 243.19, "close": 246.29, "adjusted_close": 238.9013, "volume": 1327500},
+  {"date": "2026-03-19", "open": 244.96, "high": 251.82, "low": 243.21, "close": 251.15, "adjusted_close": 243.6155, "volume": 738200},
+  {"date": "2026-03-20", "open": 249.8, "high": 250.34, "low": 245.45, "close": 246.62, "adjusted_close": 239.2214, "volume": 793100},
+  {"date": "2026-03-23", "open": 246.77, "high": 255.87, "low": 245.23, "close": 253.12, "adjusted_close": 245.5264, "volume": 1317600},
+  {"date": "2026-03-24", "open": 253.08, "high": 254.37, "low": 245.4, "close": 247.54, "adjusted_close": 240.1138, "volume": 1452000},
+  {"date": "2026-03-25", "open": 249.34, "high": 250.15, "low": 243.95, "close": 246.04, "adjusted_close": 238.6588, "volume": 978000}
+]

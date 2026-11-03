@@ -1,0 +1,7 @@
+[
+  {"date": "2026-09-03", "open": 46.91, "high": 47.1, "low": 45.71, "close": 46.32, "adjusted_close": 45.6252, "volume": 1164400},
+  {"date": "2026-09-04", "open": 46.36, "high": 46.87, "low": 45.71, "close": 46.13, "adjusted_close": 45.4381, "volume": 1108000},
+  {"date": "2026-09-07", "open": 46.13, "high": 46.13, "low": 46.13, "close": 46.13, "adjusted_close": 45.4381, "volume": 0},
+  {"date": "2026-09-08", "open": 47.45, "high": 47.69, "low": 46.59, "close": 47.07, "adjusted_close": 46.364, "volume": 797400},
+  {"date": "2026-09-09", "open": 46.78, "high": 47.37, "low": 46.53, "close": 47.03, "adjusted_close": 46.3246, "volume": 1053600}
+]
