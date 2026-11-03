@@ -12,7 +12,7 @@ from tests.helpers import TEST_KEY
 
 def from_env(tmp_path: Path, **env: str) -> Settings:
     """Settings from a clean environment whose state dir is under ``tmp_path``."""
-    return Settings.from_env({"XDG_STATE_HOME": str(tmp_path), **env})
+    return Settings.from_env({"XDG_STATE_HOME": str(tmp_path), "LOCALAPPDATA": str(tmp_path), **env})
 
 
 def test_defaults(tmp_path: Path) -> None:
@@ -62,6 +62,7 @@ def test_reads_the_process_environment_by_default(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("EODHD_API_KEY", TEST_KEY)
     monkeypatch.setenv("EODHD_GUARD_DAILY_BUDGET", "7")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     settings = Settings.from_env()
     assert settings.api_key == TEST_KEY
     assert settings.daily_budget == 7
@@ -124,6 +125,7 @@ class TestApiKey:
 
     def test_home_is_expanded_in_the_file_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         (tmp_path / "k").write_text(TEST_KEY, encoding="utf-8")
         assert from_env(tmp_path, EODHD_API_KEY_FILE="~/k").api_key == TEST_KEY
 
@@ -267,6 +269,7 @@ def test_log_level_is_normalised(tmp_path: Path) -> None:
 class TestStateDir:
     def test_the_variable_wins_and_is_expanded(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         assert from_env(tmp_path, EODHD_GUARD_STATE_DIR="~/state").state_dir == tmp_path / "state"
 
     def test_a_relative_path_is_made_absolute(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -286,6 +289,7 @@ class TestStateDir:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         assert Settings().state_dir == tmp_path / "eodhd-guard-mcp"
 
 
@@ -300,11 +304,13 @@ class TestDefaultStateDir:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, xdg: str
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         expected = tmp_path / ".local" / "state" / "eodhd-guard-mcp"
         assert default_state_dir({"XDG_STATE_HOME": xdg}, platform="linux") == expected
 
     def test_home_fallback(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         assert default_state_dir({}, platform="darwin") == tmp_path / ".local" / "state" / "eodhd-guard-mcp"
 
     def test_windows_uses_local_app_data(self) -> None:
@@ -336,7 +342,7 @@ class TestRepr:
     def test_the_other_fields_are_shown(self, tmp_path: Path) -> None:
         text = repr(Settings(api_key=TEST_KEY, state_dir=tmp_path, daily_budget=42))
         assert "daily_budget=42" in text
-        assert str(tmp_path) in text
+        assert tmp_path.name in text
 
 
 def test_settings_are_immutable() -> None:
