@@ -1,0 +1,4 @@
+[
+  {"Code": "ROG", "Exchange": "US", "Name": "Rogwell Industries Inc", "Type": "Common Stock", "Country": "USA", "Currency": "USD", "ISIN": "YY0000009001", "isPrimary": true, "previousClose": 77.1, "previousCloseDate": "2026-11-02"},
+  {"Code": "ROGX", "Exchange": "SW", "Name": "Rogue Systems AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000009001", "isPrimary": true, "previousClose": 18.4, "previousCloseDate": "2026-11-02"}
+]

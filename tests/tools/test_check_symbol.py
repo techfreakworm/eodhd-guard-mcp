@@ -66,6 +66,19 @@ def hit(
     }
 
 
+def listed(code: str, name: str | None, isin: str | None = None, exchange: str = "SW") -> dict[str, Any]:
+    """One synthetic row of an exchange symbol list."""
+    return {
+        "Code": code,
+        "Name": name,
+        "Country": "Freedonia",
+        "Exchange": exchange,
+        "Currency": "FDD",
+        "Type": "Common Stock",
+        "Isin": isin,
+    }
+
+
 def bar(day: str) -> dict[str, Any]:
     return {
         "date": day,
@@ -84,6 +97,23 @@ def add_roche(mock_api: MockEODHD, bars: Any = None) -> None:
     mock_api.add("real-time/ROG.SW", load_fixture("tools_ref_quote_na"))
     mock_api.add("search/ROG", load_fixture("tools_ref_search_rog"))
     mock_api.add("search/Roche Holding AG", load_fixture("tools_ref_search_roche_name"))
+
+
+def add_frozen_line_missing_from_search(mock_api: MockEODHD, bars: Any = None) -> None:
+    """How a frozen line really behaves: search no longer returns it, and only the delisted list has it."""
+    mock_api.add("eod/ROG.SW", load_fixture("tools_ref_eod_rog_frozen") if bars is None else bars)
+    mock_api.add("real-time/ROG.SW", load_fixture("tools_ref_quote_na"))
+    mock_api.add("search/ROG", load_fixture("tools_ref_search_rog_other"))
+    mock_api.add("exchange-symbol-list/SW", load_fixture("tools_ref_symbols_delisted_sw"))
+    mock_api.add("search/Roche Holding AG", load_fixture("tools_ref_search_roche_name_two"))
+
+
+def add_line_nobody_knows(mock_api: MockEODHD) -> None:
+    """Neither search nor the delisted list has ROG.SW."""
+    mock_api.add("eod/ROG.SW", load_fixture("tools_ref_eod_rog_frozen"))
+    mock_api.add("real-time/ROG.SW", load_fixture("tools_ref_quote_na"))
+    mock_api.add("search/ROG", load_fixture("tools_ref_search_rog_other"))
+    mock_api.add("exchange-symbol-list/SW", [listed("OLDSW", "Oldswiss Holdings AG")])
 
 
 def add_acme(mock_api: MockEODHD) -> None:
@@ -141,11 +171,11 @@ async def test_a_frozen_code_is_caught_and_its_successor_is_named(
     assert any("Holidays are not modelled" in note for note in body["meta"]["notes"])
 
 
-async def test_the_story_is_told_with_two_searches_the_second_on_the_same_exchange(
+async def test_both_searches_are_limited_to_the_exchange_and_an_exact_hit_makes_no_list_call(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     add_roche(mock_api)
-    ok(await check(mcp_client, "ROG.SW"))
+    body = ok(await check(mcp_client, "ROG.SW"))
     eod, by_code, by_name = mock_api.requests
     assert eod.path == "eod/ROG.SW"
     assert eod.params == {
@@ -155,11 +185,16 @@ async def test_the_story_is_told_with_two_searches_the_second_on_the_same_exchan
         "order": "a",
         "fmt": "json",
     }
-    assert (by_code.path, by_code.params) == ("search/ROG", {"limit": "50", "fmt": "json"})
+    assert (by_code.path, by_code.params) == (
+        "search/ROG",
+        {"limit": "50", "exchange": "SW", "fmt": "json"},
+    )
     assert (by_name.path, by_name.params) == (
         "search/Roche Holding AG",
         {"limit": "50", "exchange": "SW", "fmt": "json"},
     )
+    assert mock_api.count("exchange-symbol-list") == 0
+    assert "delisted list" not in body["data"]["advice"]
 
 
 async def test_a_frozen_code_with_an_empty_window_has_no_last_bar_date_and_no_session_count(
@@ -297,38 +332,59 @@ async def test_a_404_is_not_found_and_free(mcp_client: Client, mock_api: MockEOD
     assert deps.ledger.spent_today() == 0
 
 
-async def test_a_not_found_code_that_no_search_knows_ends_with_a_search_hint(
+async def test_a_not_found_code_that_neither_search_nor_the_delisted_list_knows_ends_with_a_search_hint(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
     mock_api.add("search/GONE", [])
+    mock_api.add("exchange-symbol-list/US", [listed("OTHER", "Other Inc", exchange="US")])
     body = ok(await check(mcp_client, "GONE.US"))
     assert body["data"]["status"] == "not_found"
     assert (body["data"]["name"], body["data"]["successor_candidates"]) == (None, [])
     assert (
-        "so there was nothing to search by name. Use search_symbols with the company name."
-        in body["data"]["advice"]
+        "Could not find the line's name in search or in the delisted list for US, so no successor "
+        "search was possible. Use search_symbols with the company name." in body["data"]["advice"]
     )
-    assert (body["meta"]["cost"], body["meta"]["endpoints"]) == (1, ["search"])
+    assert (body["meta"]["cost"], body["meta"]["endpoints"]) == (2, ["search", "exchange-symbol-list"])
 
 
-async def test_a_not_found_code_borrows_the_name_of_the_same_code_on_another_exchange(
+async def test_a_not_found_code_is_named_from_the_delisted_list(
     mcp_client: Client, mock_api: MockEODHD
 ) -> None:
     mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
-    mock_api.add("search/GONE", [hit("GONE", "LSE", "Gone Industries plc", isin="ZZ00000000G1")])
+    mock_api.add("search/GONE", [])
     mock_api.add(
-        "search/Gone Industries plc", [hit("GONEX", "US", "Gone Industries plc", isin="ZZ00000000G2")]
+        "exchange-symbol-list/US", [listed("GONE", "Gone Industries Inc", "ZZ00000000G1", exchange="US")]
+    )
+    mock_api.add(
+        "search/Gone Industries Inc", [hit("GONEX", "US", "Gone Industries Inc", isin="ZZ00000000G2")]
     )
     body = ok(await check(mcp_client, "GONE.US"))
     data = body["data"]
-    assert (data["name"], data["isin"]) == ("Gone Industries plc", "ZZ00000000G1")
-    assert [candidate["symbol"] for candidate in data["successor_candidates"]] == ["GONEX.US"]
-    assert any(
-        note.startswith("The name and ISIN come from GONE.LSE, a line with the same code on another exchange")
-        for note in body["meta"]["notes"]
+    assert (data["status"], data["name"], data["isin"]) == (
+        "not_found",
+        "Gone Industries Inc",
+        "ZZ00000000G1",
     )
-    assert body["meta"]["cost"] == 2
+    assert [candidate["symbol"] for candidate in data["successor_candidates"]] == ["GONEX.US"]
+    assert "EODHD's delisted list for US has GONE as 'Gone Industries Inc'." in data["advice"]
+    assert body["meta"]["cost"] == 3
+
+
+async def test_a_row_of_the_same_code_on_another_exchange_is_never_used(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [hit("GONE", "LSE", "Gone Elsewhere plc", isin="YY00000000G9")])
+    mock_api.add("exchange-symbol-list/US", [listed("OTHER", "Other Inc", exchange="US")])
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert (body["data"]["name"], body["data"]["isin"]) == (None, None)
+    assert "Gone Elsewhere" not in json.dumps(body)
+    assert [request.path for request in mock_api.requests] == [
+        "eod/GONE.US",
+        "search/GONE",
+        "exchange-symbol-list/US",
+    ]
 
 
 async def test_the_line_itself_is_preferred_over_the_same_code_elsewhere(
@@ -347,7 +403,338 @@ async def test_the_line_itself_is_preferred_over_the_same_code_elsewhere(
     assert (body["data"]["name"], body["data"]["isin"]) == ("Gone Industries Inc", "ZZ00000000G3")
     assert body["meta"]["notes"] == []
     assert "No other code on US with a recent price matches 'Gone Industries Inc'" in body["data"]["advice"]
-    assert "list_exchange_symbols with delisted=true" in body["data"]["advice"]
+    assert "try search_symbols with the new name" in body["data"]["advice"]
+    assert mock_api.count("exchange-symbol-list") == 0
+
+
+# --- the line is no longer in search: the delisted list --------------------------------------------
+
+
+async def test_a_frozen_line_that_search_no_longer_returns_is_named_from_the_delisted_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_frozen_line_missing_from_search(mock_api)
+    body = ok(await check(mcp_client, "ROG.SW"))
+    data = body["data"]
+    assert (data["status"], data["last_bar_date"]) == ("stale", "2026-03-25")
+    assert (data["name"], data["isin"]) == ("Roche Holding AG", "ZZ0000001001")
+    assert [candidate["symbol"] for candidate in data["successor_candidates"]] == ["ROP.SW", "RO.SW"]
+    assert data["successor_candidates"][0] == {
+        "symbol": "ROP.SW",
+        "name": "Roche Holding AG",
+        "isin": "ZZ0000001002",
+        "previous_close_date": "2026-11-02",
+    }
+    assert "EODHD's delisted list for SW has ROG as 'Roche Holding AG'." in data["advice"]
+    assert "Possible successors: ROP.SW (Roche Holding AG, ISIN ZZ0000001002); RO.SW (" in data["advice"]
+
+    assert [(r.path, r.params.get("exchange"), r.params.get("delisted")) for r in mock_api.requests] == [
+        ("eod/ROG.SW", None, None),
+        ("search/ROG", "SW", None),
+        ("exchange-symbol-list/SW", None, "1"),
+        ("search/Roche Holding AG", "SW", None),
+    ]
+    assert body["meta"]["cost"] == 4
+    assert body["meta"]["endpoints"] == ["eod", "search", "exchange-symbol-list"]
+    assert warning_codes(body) == ["STALE_DATA"]
+
+
+async def test_the_other_company_with_the_same_code_that_search_returned_is_never_used(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_frozen_line_missing_from_search(mock_api)
+    body = ok(await check(mcp_client, "ROG.SW"))
+    assert "Rogwell" not in json.dumps(body)
+    assert mock_api.count("search/Rogwell") == 0
+    assert mock_api.count("search/") == 2
+
+
+async def test_with_a_quote_the_delisted_path_costs_five_calls(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_frozen_line_missing_from_search(mock_api)
+    body = ok(await check(mcp_client, "ROG.SW", include_quote=True))
+    assert (body["data"]["status"], body["data"]["quote_status"]) == ("stale", "no_quote")
+    assert body["meta"]["cost"] == 5
+    assert body["meta"]["endpoints"] == ["eod", "real-time", "search", "exchange-symbol-list"]
+    assert warning_codes(body) == ["STALE_DATA", "NO_QUOTE"]
+
+
+async def test_when_neither_search_nor_the_delisted_list_has_the_line_no_name_search_is_made(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_line_nobody_knows(mock_api)
+    body = ok(await check(mcp_client, "ROG.SW"))
+    data = body["data"]
+    assert data["status"] == "stale"
+    assert (data["name"], data["isin"], data["successor_candidates"]) == (None, None, [])
+    assert data["advice"].endswith(
+        "Could not find the line's name in search or in the delisted list for SW, so no successor "
+        "search was possible. Use search_symbols with the company name."
+    )
+    assert [request.path for request in mock_api.requests] == [
+        "eod/ROG.SW",
+        "search/ROG",
+        "exchange-symbol-list/SW",
+    ]
+    assert body["meta"]["cost"] == 3
+    assert "Rogwell" not in json.dumps(body)
+
+
+async def test_an_exact_search_hit_makes_no_delisted_list_call(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_roche(mock_api)
+    mock_api.add("exchange-symbol-list/SW", load_fixture("tools_ref_symbols_delisted_sw"))
+    body = ok(await check(mcp_client, "ROG.SW"))
+    assert mock_api.count("exchange-symbol-list") == 0
+    assert body["meta"]["endpoints"] == ["eod", "search"]
+    assert body["meta"]["cost"] == 3
+
+
+@pytest.mark.parametrize(
+    ("setup", "include_quote", "cost", "endpoints"),
+    [
+        (add_roche, False, 3, ["eod", "search"]),
+        (add_roche, True, 4, ["eod", "real-time", "search"]),
+        (add_frozen_line_missing_from_search, False, 4, ["eod", "search", "exchange-symbol-list"]),
+        (
+            add_frozen_line_missing_from_search,
+            True,
+            5,
+            ["eod", "real-time", "search", "exchange-symbol-list"],
+        ),
+        (add_line_nobody_knows, False, 3, ["eod", "search", "exchange-symbol-list"]),
+        (add_line_nobody_knows, True, 4, ["eod", "real-time", "search", "exchange-symbol-list"]),
+    ],
+)
+async def test_the_cost_of_each_lookup_path_is_exact_and_matches_the_ledger(
+    mcp_client: Client,
+    mock_api: MockEODHD,
+    deps: Deps,
+    setup: Any,
+    include_quote: bool,
+    cost: int,
+    endpoints: list[str],
+) -> None:
+    setup(mock_api)
+    body = ok(await check(mcp_client, "ROG.SW", include_quote=include_quote))
+    assert (body["meta"]["cost"], body["meta"]["endpoints"]) == (cost, endpoints)
+    assert deps.ledger.spent_today() == cost
+
+
+async def test_the_delisted_list_is_shared_with_list_exchange_symbols_in_both_directions(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_frozen_line_missing_from_search(mock_api)
+    listing = ok(await mcp_client.call_tool("list_exchange_symbols", {"exchange": "SW", "delisted": True}))
+    assert listing["meta"]["cost"] == 1
+    body = ok(await check(mcp_client, "ROG.SW"))
+    assert body["meta"]["cost"] == 3
+    assert body["meta"]["endpoints"] == ["eod", "search", "exchange-symbol-list"]
+    assert mock_api.count("exchange-symbol-list/SW") == 1
+
+
+async def test_a_list_fetched_by_check_symbol_is_free_for_list_exchange_symbols(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_frozen_line_missing_from_search(mock_api)
+    assert ok(await check(mcp_client, "ROG.SW"))["meta"]["cost"] == 4
+    listing = ok(
+        await mcp_client.call_tool(
+            "list_exchange_symbols", {"exchange": "SW", "delisted": True, "query": "roche"}
+        )
+    )
+    assert (listing["meta"]["cost"], listing["meta"]["cached"]) == (0, True)
+    assert [row["symbol"] for row in listing["data"]["symbols"]] == ["ROG.SW"]
+    assert mock_api.count("exchange-symbol-list/SW") == 1
+
+
+async def test_a_search_hit_with_a_name_that_cannot_be_searched_falls_back_to_the_delisted_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [hit("GONE", "US", "..", isin="ZZ00000000G1")])
+    mock_api.add(
+        "exchange-symbol-list/US", [listed("GONE", "Gone Industries Inc", "ZZ00000000G4", exchange="US")]
+    )
+    mock_api.add("search/Gone Industries Inc", [])
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert (body["data"]["name"], body["data"]["isin"]) == ("Gone Industries Inc", "ZZ00000000G4")
+
+
+@pytest.mark.parametrize("name", ["..", "///", "."])
+async def test_a_name_that_cannot_be_searched_for_is_treated_as_no_name(
+    mcp_client: Client, mock_api: MockEODHD, name: str
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [hit("GONE", "US", name, isin="ZZ00000000G1")])
+    mock_api.add("exchange-symbol-list/US", [listed("GONE", name, "ZZ00000000G1", exchange="US")])
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert (body["data"]["name"], body["data"]["isin"]) == (None, None)
+    assert "Could not find the line's name" in body["data"]["advice"]
+    assert (body["meta"]["cost"], mock_api.count("search/")) == (2, 1)
+
+
+@pytest.mark.parametrize("rows", [[], [listed("GONE", None, exchange="US")], "unreadable"])
+async def test_a_delisted_list_without_a_usable_row_for_the_code_gives_no_name(
+    mcp_client: Client, mock_api: MockEODHD, rows: Any
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [])
+    mock_api.add("exchange-symbol-list/US", rows if rows != "unreadable" else [5, "text", {"Code": 7}])
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert body["data"]["name"] is None
+    assert "Could not find the line's name in search or in the delisted list for US" in body["data"]["advice"]
+
+
+async def test_an_exchange_the_list_endpoint_does_not_know_is_no_name_not_an_error(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [])
+    mock_api.add("exchange-symbol-list/US", status=404, text="Exchange Not Found.")
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert "Could not find the line's name" in body["data"]["advice"]
+    assert "stopped early" not in body["data"]["advice"]
+    assert body["meta"]["cost"] == 1
+
+
+@pytest.mark.parametrize(
+    ("route", "word"),
+    [({"status": 500}, "UPSTREAM_ERROR"), ({"body": {"unexpected": "object"}}, "BAD_RESPONSE")],
+)
+async def test_a_failing_delisted_list_keeps_the_verdict_and_says_so(
+    mcp_client: Client, mock_api: MockEODHD, route: dict[str, Any], word: str
+) -> None:
+    mock_api.add("eod/ROG.SW", load_fixture("tools_ref_eod_rog_frozen"))
+    mock_api.add("search/ROG", load_fixture("tools_ref_search_rog_other"))
+    mock_api.add("exchange-symbol-list/SW", **route)
+    body = ok(await check(mcp_client, "ROG.SW"))
+    assert body["data"]["status"] == "stale"
+    assert body["data"]["name"] is None
+    assert f"The successor search stopped early ({word}: " in body["data"]["advice"]
+    assert "STALE_DATA" in warning_codes(body)
+
+
+async def test_a_code_the_delisted_list_holds_for_two_companies_is_not_guessed(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [])
+    mock_api.add(
+        "exchange-symbol-list/US",
+        [
+            listed("GONE", "Gone Industries Inc", "ZZ00000000G1", exchange="US"),
+            listed("GONE", "Gone Mining Corp", "ZZ00000000G5", exchange="US"),
+            listed("GONE", "GONE INDUSTRIES INC", None, exchange="US"),
+        ],
+    )
+    body = ok(await check(mcp_client, "GONE.US"))
+    data = body["data"]
+    assert (data["name"], data["isin"], data["successor_candidates"]) == (None, None, [])
+    assert (
+        "The delisted list for US holds 2 different companies under the code GONE "
+        "('Gone Industries Inc'; 'Gone Mining Corp'), so its name could not be settled." in data["advice"]
+    )
+    assert data["advice"].endswith("Use search_symbols with the company name.")
+    assert mock_api.count("search/") == 1
+
+
+async def test_rows_of_one_company_under_the_same_code_are_one_line_and_give_the_isin_that_exists(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
+    mock_api.add("search/GONE", [])
+    mock_api.add(
+        "exchange-symbol-list/US",
+        [
+            listed("GONE", "Gone Industries Inc", None, exchange="US"),
+            listed("GONE", "GONE INDUSTRIES INC", "ZZ00000000G6", exchange="US"),
+        ],
+    )
+    mock_api.add("search/Gone Industries Inc", [])
+    body = ok(await check(mcp_client, "GONE.US"))
+    assert (body["data"]["name"], body["data"]["isin"]) == ("Gone Industries Inc", "ZZ00000000G6")
+
+
+async def test_a_line_with_current_bars_is_not_looked_up_in_the_delisted_list(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    mock_api.add("eod/ACME.US", load_fixture("tools_ref_eod_acme_fresh"))
+    mock_api.add("real-time/ACME.US", load_fixture("tools_ref_quote_na"))
+    mock_api.add("search/ACME", [])
+    body = ok(await check(mcp_client, "ACME.US", include_quote=True))
+    assert body["data"]["status"] == "no_quote"
+    assert mock_api.count("exchange-symbol-list") == 0
+    assert body["meta"]["cost"] == 3
+
+
+# --- successor candidates: the ISIN country first --------------------------------------------------
+
+
+def add_gone_sw(mock_api: MockEODHD, isin: str | None, rows: list[dict[str, Any]]) -> None:
+    mock_api.add("eod/GONE.SW", [bar("2026-01-05")])
+    mock_api.add("search/GONE", [])
+    mock_api.add("exchange-symbol-list/SW", [listed("GONE", "Gone Industries AG", isin)])
+    mock_api.add("search/Gone Industries AG", rows)
+
+
+def other(code: str, isin: str | None) -> dict[str, Any]:
+    return hit(code, "SW", "Gone Industries AG", isin=isin)
+
+
+async def test_candidates_with_the_isin_country_of_the_line_come_first_and_the_others_stay(
+    mcp_client: Client, mock_api: MockEODHD
+) -> None:
+    add_gone_sw(
+        mock_api,
+        "ZZ0000000G10",
+        [
+            other("A1", "YY0000000A01"),
+            other("A2", "YY0000000A02"),
+            other("A3", None),
+            other("A4", "YY0000000A04"),
+            other("A5", "YY0000000A05"),
+            other("B1", "ZZ0000000B01"),
+            other("B2", "zz0000000b02"),
+            other("B3", "ZZ0000000B03"),
+        ],
+    )
+    body = ok(await check(mcp_client, "GONE.SW"))
+    symbols = [candidate["symbol"] for candidate in body["data"]["successor_candidates"]]
+    assert symbols == ["B1.SW", "B2.SW", "B3.SW", "A1.SW", "A2.SW"]
+
+
+@pytest.mark.parametrize("isin", [None, "", "1234", "9Z0000000G10"])
+async def test_without_a_known_isin_country_the_order_is_the_one_eodhd_gave(
+    mcp_client: Client, mock_api: MockEODHD, isin: str | None
+) -> None:
+    add_gone_sw(
+        mock_api,
+        isin,
+        [other("A1", "YY0000000A01"), other("B1", "ZZ0000000B01"), other("A2", None)],
+    )
+    body = ok(await check(mcp_client, "GONE.SW"))
+    symbols = [candidate["symbol"] for candidate in body["data"]["successor_candidates"]]
+    assert symbols == ["A1.SW", "B1.SW", "A2.SW"]
+
+
+# --- the STALE_DATA warning ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bars", [None, []])
+async def test_the_stale_warning_does_not_tell_check_symbol_to_run_check_symbol(
+    mcp_client: Client, mock_api: MockEODHD, bars: Any
+) -> None:
+    add_roche(mock_api, bars=bars)
+    body = ok(await check(mcp_client, "ROG.SW"))
+    stale = warning(body, "STALE_DATA")
+    assert "check_symbol" not in stale["message"]
+    assert stale["message"].endswith("so this may be a dead line and not a quiet market.")
+    assert "2026-11-02" in stale["message"]
+    assert stale["details"]["symbol"] == "ROG.SW"
+    assert stale["details"]["expected_latest"] == "2026-11-02"
 
 
 # --- candidates ---------------------------------------------------------------------------------------
@@ -397,18 +784,7 @@ async def test_a_name_search_that_finds_nothing_new_says_so_without_inventing_a_
     assert (body["data"]["name"], body["data"]["successor_candidates"]) == ("Roche Holding AG", [])
     assert "No other code on SW with a recent price matches 'Roche Holding AG'" in body["data"]["advice"]
     assert body["meta"]["cost"] == 3
-
-
-@pytest.mark.parametrize("name", ["..", "///", "."])
-async def test_a_name_that_cannot_be_searched_for_is_treated_as_no_name(
-    mcp_client: Client, mock_api: MockEODHD, name: str
-) -> None:
-    mock_api.add("eod/GONE.US", status=404, text="Ticker Not Found.")
-    mock_api.add("search/GONE", [hit("GONE", "US", name, isin="ZZ00000000G1")])
-    body = ok(await check(mcp_client, "GONE.US"))
-    assert (body["data"]["name"], body["data"]["isin"]) == (None, None)
-    assert "so there was nothing to search by name" in body["data"]["advice"]
-    assert (body["meta"]["cost"], mock_api.count("search/")) == (1, 1)
+    assert mock_api.count("exchange-symbol-list") == 0
 
 
 # --- no quote and quote trouble -----------------------------------------------------------------------
@@ -683,6 +1059,7 @@ async def test_the_api_key_is_in_no_result_even_when_it_is_in_the_input_or_echoe
     mock_api.add("eod/GONE.US", status=404, text=f"Ticker Not Found for {TEST_KEY}")
     mock_api.add("eod/DENIED.US", status=401, text=f"invalid token {TEST_KEY}")
     mock_api.add("search/GONE", [])
+    mock_api.add("exchange-symbol-list/US", [])
     results = [
         await check(mcp_client, "ACME.US", include_quote=True),
         await check(mcp_client, "ROG.SW", include_quote=True),

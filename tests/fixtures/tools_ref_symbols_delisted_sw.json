@@ -1,0 +1,5 @@
+[
+  {"Code": "OLDSW", "Name": "Oldswiss Holdings AG", "Country": "Switzerland", "Exchange": "SW", "Currency": "CHF", "Type": "Common Stock", "Isin": "ZZ0000090011"},
+  {"Code": "ROG", "Name": "Roche Holding AG", "Country": "Switzerland", "Exchange": "SW", "Currency": "CHF", "Type": "Common Stock", "Isin": "ZZ0000001001"},
+  {"Code": "ROGERS", "Name": "Rogers-like Cables AG", "Country": "Switzerland", "Exchange": "SW", "Currency": "CHF", "Type": "Common Stock", "Isin": "ZZ0000090012"}
+]

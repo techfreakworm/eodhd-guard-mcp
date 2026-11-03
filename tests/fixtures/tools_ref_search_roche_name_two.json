@@ -1,0 +1,6 @@
+[
+  {"Code": "ROG", "Exchange": "SW", "Name": "Roche Holding AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000001001", "isPrimary": true, "previousClose": 251.3, "previousCloseDate": "2026-03-25"},
+  {"Code": "ROP", "Exchange": "SW", "Name": "Roche Holding AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000001002", "isPrimary": true, "previousClose": 262.8, "previousCloseDate": "2026-11-02"},
+  {"Code": "RO", "Exchange": "SW", "Name": "Roche Holding AG", "Type": "Common Stock", "Country": "Switzerland", "Currency": "CHF", "ISIN": "ZZ0000001003", "isPrimary": false, "previousClose": 301.5, "previousCloseDate": "2026-11-02"},
+  {"Code": "RCHX", "Exchange": "US", "Name": "Roche Holding AG sponsored line", "Type": "Common Stock", "Country": "USA", "Currency": "USD", "ISIN": "YY0000001003", "isPrimary": false, "previousClose": 31.4, "previousCloseDate": "2026-11-02"}
+]

@@ -74,9 +74,10 @@ CHECK_SYMBOL_DESCRIPTION = (
     "Check whether a symbol is alive, and look for its successor if it is not. EODHD keeps answering "
     "HTTP 200 with frozen data for delisted or renamed codes, so this compares the newest of the last 14 "
     "days of bars with the latest session expected. Costs 1 API call, plus 1 for a quote with "
-    "include_quote, plus 2 searches for a successor when the answer is not ok and find_successor is on: "
-    "4 at most, and 0 for Tokyo and the UAE, which EODHD does not cover. Candidates are leads: compare "
-    "the ISIN and name before switching."
+    "include_quote, plus up to 3 for the successor search when the answer is not ok and find_successor "
+    "is on (a search by code, the exchange's delisted list if search no longer returns the line, a "
+    "search by name): 5 at most, and 0 for Tokyo and the UAE, which EODHD does not cover. Candidates "
+    "are leads: compare the ISIN and name before switching."
 )
 
 T = TypeVar("T")
@@ -258,12 +259,15 @@ async def list_exchanges(deps: Deps, query: str | None) -> ToolResponse:
 # --- list_exchange_symbols --------------------------------------------------------------------------
 
 
-def _read_listed(raw: object, exchange: str) -> dict[str, Any] | None:
-    """One row of an exchange symbol list; ``symbol`` uses the requested exchange, not the row's venue."""
+def _read_listed(raw: object, exchange: str, only: str | None = None) -> dict[str, Any] | None:
+    """One row of an exchange symbol list; ``symbol`` uses the requested exchange, not the row's venue.
+
+    With ``only``, rows of other codes are skipped before anything is built.
+    """
     if not isinstance(raw, dict):
         return None
     code = _text(raw.get("Code"))
-    if code is None:
+    if code is None or (only is not None and code.upper() != only):
         return None
     code = code.upper()
     return {
@@ -321,6 +325,18 @@ def _page_warning(total: int, count: int, offset: int) -> ToolWarning:
     )
 
 
+async def _fetch_symbol_list(deps: Deps, exchange: str, *, delisted: bool, tag: str | None) -> ApiResponse:
+    """The whole symbol list of an exchange. One request shape, so every caller shares one cache entry."""
+    return await deps.client.get(
+        f"exchange-symbol-list/{exchange}",
+        {"delisted": 1 if delisted else None},
+        endpoint="exchange-symbol-list",
+        cost=cost_for("exchange-symbol-list"),
+        ttl_s=SYMBOLS_TTL_S,
+        symbol=tag,
+    )
+
+
 async def list_exchange_symbols(
     deps: Deps,
     exchange: str,
@@ -335,13 +351,7 @@ async def list_exchange_symbols(
     query, kind = _given(query), _given(kind)
     ensure_exchange_covered(code, "symbols", allow_uncovered=deps.settings.allow_uncovered)
     try:
-        response = await deps.client.get(
-            f"exchange-symbol-list/{code}",
-            {"delisted": 1 if delisted else None},
-            endpoint="exchange-symbol-list",
-            cost=cost_for("exchange-symbol-list"),
-            ttl_s=SYMBOLS_TTL_S,
-        )
+        response = await _fetch_symbol_list(deps, code, delisted=delisted, tag=None)
     except GuardError as exc:
         if exc.code is not ErrorCode.NOT_FOUND:
             raise
@@ -598,13 +608,15 @@ class _QuoteProbe:
 
 @dataclass
 class _Successors:
-    """What the two searches found. ``searched`` is False when they were not run."""
+    """What the lookup found. ``searched`` is False when it was not run."""
 
     searched: bool = False
     name: str | None = None
     isin: str | None = None
-    borrowed_from: str | None = None
-    """Set when the name comes from a line with the same code on another exchange."""
+    delisted: bool = False
+    """True when the line was found in the exchange's delisted list: EODHD itself calls it delisted."""
+    clashing_names: list[str] = field(default_factory=list)
+    """Different companies the delisted list holds under this code. The name can not be settled."""
     candidates: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
@@ -666,63 +678,129 @@ async def _probe_quote(deps: Deps, symbol: Symbol) -> _QuoteProbe:
     return _QuoteProbe("ok" if usable else "no_quote", response)
 
 
-def _pick_line(hits: Sequence[_Hit], symbol: Symbol) -> _Hit | None:
-    """The row for this very line, else a row with the same code on another exchange that has a name."""
-    exact = next((h for h in hits if h.code == symbol.code and h.exchange == symbol.exchange), None)
-    if exact is not None:
-        return exact
-    return next((h for h in hits if h.code == symbol.code and h.name), None)
+def _usable_name(name: str | None) -> bool:
+    return name is not None and _searchable(_clean_query(name))
 
 
-def _candidates(deps: Deps, hits: Sequence[_Hit], symbol: Symbol, now: datetime) -> list[dict[str, Any]]:
-    """Other codes on the same exchange whose previous close is recent: lines the company may continue as."""
-    found: dict[str, dict[str, Any]] = {}
+def _exact_hit(hits: Sequence[_Hit], symbol: Symbol) -> _Hit | None:
+    """The search row for this very line. A row of the same code on another exchange is another security."""
+    return next((h for h in hits if h.code == symbol.code and h.exchange == symbol.exchange), None)
+
+
+async def _delisted_rows(deps: Deps, symbol: Symbol, responses: list[ApiResponse]) -> list[dict[str, Any]]:
+    """The rows of the exchange's delisted list that carry this very code.
+
+    It is the list ``list_exchange_symbols`` pages, so a call made by either one is free for the other.
+    An exchange the list endpoint does not know has no rows.
+    """
+    try:
+        response = await _fetch_symbol_list(deps, symbol.exchange, delisted=True, tag=symbol.full)
+    except GuardError as exc:
+        if exc.code is ErrorCode.NOT_FOUND:
+            return []
+        raise
+    responses.append(response)
+    if not isinstance(response.data, list):
+        raise _bad_answer("exchange-symbol-list", f"is a {type(response.data).__name__}, not a list")
+    rows = (_read_listed(raw, symbol.exchange, only=symbol.code) for raw in response.data)
+    return [row for row in rows if row is not None]
+
+
+def _settle_listed_line(rows: Sequence[dict[str, Any]], found: _Successors) -> None:
+    """Take the name from the delisted rows of one code, unless they belong to different companies.
+
+    A delisted list can hold a code more than once (codes get reused), and a name from the wrong company
+    would send the successor search after the wrong company.
+    """
+    companies: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _clean_query(row["name"] or "").casefold()
+        if _searchable(key):
+            companies.setdefault(key, []).append(row)
+    if len(companies) > 1:
+        found.clashing_names = [group[0]["name"] for group in companies.values()]
+    elif companies:
+        (group,) = companies.values()
+        found.name = group[0]["name"]
+        found.isin = next((row["isin"] for row in group if row["isin"]), None)
+        found.delisted = True
+
+
+async def _identify_line(
+    deps: Deps, symbol: Symbol, responses: list[ApiResponse], found: _Successors, *, delisted_too: bool
+) -> None:
+    """Find the line's name and ISIN: in search first, then, if allowed, in the exchange's delisted list.
+
+    Only this very line counts. EODHD's search no longer returns a frozen line, and a row with the same
+    code on another exchange can be another company, so such a row is never used.
+    """
+    hits = await _search(
+        deps,
+        symbol.code,
+        exchange=symbol.exchange,
+        kind=None,
+        limit=SEARCH_POOL,
+        tag=symbol.full,
+        responses=responses,
+    )
+    line = _exact_hit(hits, symbol)
+    if line is not None and _usable_name(line.name):
+        found.name, found.isin = line.name, line.isin
+    elif delisted_too:
+        _settle_listed_line(await _delisted_rows(deps, symbol, responses), found)
+
+
+def _isin_country(isin: str | None) -> str | None:
+    """The two letters an ISIN starts with: the country of issue (XS for international issues)."""
+    return isin[:2].upper() if isin and isin[:2].isalpha() else None
+
+
+def _candidates(
+    deps: Deps, hits: Sequence[_Hit], symbol: Symbol, now: datetime, isin: str | None
+) -> list[dict[str, Any]]:
+    """Other codes on the same exchange with a recent previous close: lines the company may continue as.
+
+    Those whose ISIN starts with the same country letters as this line's come first. The others stay,
+    because a re-keyed line can get a new ISIN.
+    """
+    seen: set[str] = set()
+    alive: list[_Hit] = []
     for hit in hits:
-        if hit.exchange != symbol.exchange or hit.code == symbol.code or hit.symbol in found:
+        if hit.exchange != symbol.exchange or hit.code == symbol.code or hit.symbol in seen:
             continue
         if _is_inactive(deps, hit, now):
             continue
-        found[hit.symbol] = {
+        seen.add(hit.symbol)
+        alive.append(hit)
+    country = _isin_country(isin)
+    if country is not None:
+        alive.sort(key=lambda hit: _isin_country(hit.isin) != country)
+    return [
+        {
             "symbol": hit.symbol,
             "name": hit.name,
             "isin": hit.isin,
             "previous_close_date": _iso(hit.previous_close_date),
         }
-        if len(found) == MAX_CANDIDATES:
-            break
-    return list(found.values())
+        for hit in alive[:MAX_CANDIDATES]
+    ]
 
 
 async def _find_successors(
-    deps: Deps, symbol: Symbol, now: datetime, responses: list[ApiResponse]
+    deps: Deps, symbol: Symbol, now: datetime, responses: list[ApiResponse], *, delisted_too: bool
 ) -> _Successors:
-    """Look the line up by code for its name, then search that name on the same exchange.
+    """Name the line, then search that name on the same exchange for codes the company may continue as.
 
-    A failure ends the search but keeps what was found, so the verdict already paid for is not lost.
+    A failure ends the lookup but keeps what was found, so the verdict already paid for is not lost.
     """
-    result = _Successors(searched=True)
+    found = _Successors(searched=True)
     try:
-        by_code = await _search(
-            deps,
-            symbol.code,
-            exchange=None,
-            kind=None,
-            limit=SEARCH_POOL,
-            tag=symbol.full,
-            responses=responses,
-        )
-        line = _pick_line(by_code, symbol)
-        if line is None or line.name is None:
-            return result
-        name = _clean_query(line.name)
-        if not _searchable(name):
-            return result
-        result.name, result.isin = line.name, line.isin
-        if line.symbol != symbol.full:
-            result.borrowed_from = line.symbol
+        await _identify_line(deps, symbol, responses, found, delisted_too=delisted_too)
+        if found.name is None:
+            return found
         by_name = await _search(
             deps,
-            name,
+            _clean_query(found.name),
             exchange=symbol.exchange,
             kind=None,
             limit=SEARCH_POOL,
@@ -730,10 +808,10 @@ async def _find_successors(
             responses=responses,
         )
     except GuardError as exc:
-        result.error = _brief(exc, deps)
-        return result
-    result.candidates = _candidates(deps, by_name, symbol, now)
-    return result
+        found.error = _brief(exc, deps)
+        return found
+    found.candidates = _candidates(deps, by_name, symbol, now, found.isin)
+    return found
 
 
 def _status(bars: _Bars, freshness: Freshness, quote: _QuoteProbe | None) -> str:
@@ -782,6 +860,20 @@ def _describe_candidate(candidate: dict[str, Any]) -> str:
     return f"{candidate['symbol']} ({shown})" if shown else str(candidate["symbol"])
 
 
+def _identity_sentence(case: _Case) -> str:
+    """What the delisted list said about the line, when it was consulted and had something to say."""
+    found, symbol = case.successors, case.symbol
+    if found.clashing_names:
+        names = "; ".join(repr(name) for name in found.clashing_names)
+        return (
+            f"The delisted list for {symbol.exchange} holds {len(found.clashing_names)} different "
+            f"companies under the code {symbol.code} ({names}), so its name could not be settled."
+        )
+    if found.delisted:
+        return f"EODHD's delisted list for {symbol.exchange} has {symbol.code} as {found.name!r}."
+    return ""
+
+
 def _next_step(case: _Case) -> str:
     found = case.successors
     if found.candidates:
@@ -799,24 +891,32 @@ def _next_step(case: _Case) -> str:
             "To look for the right code, run check_symbol with find_successor=true, or use "
             "search_symbols with the company name."
         )
+    if found.clashing_names:
+        return "Use search_symbols with the company name."
     if found.name is None:
         return (
-            "The company could not be found by its code, so there was nothing to search by name. Use "
-            "search_symbols with the company name."
+            "Could not find the line's name in search or in the delisted list for "
+            f"{case.symbol.exchange}, so no successor search was possible. Use search_symbols with the "
+            "company name."
         )
     return (
-        f"No other code on {case.symbol.exchange} with a recent price matches {found.name!r}. A delisted "
-        "line appears only in list_exchange_symbols with delisted=true; a company that changed its name "
-        "needs search_symbols with the new name."
+        f"No other code on {case.symbol.exchange} with a recent price matches {found.name!r}. The company "
+        "may have changed its name as well as its code: try search_symbols with the new name."
     )
 
 
 def _advice(case: _Case) -> str:
-    parts = [_finding(case)]
+    parts = [_finding(case), _identity_sentence(case)]
     if case.quote is not None and case.quote.status == "error":
         parts.append(f"The quote check failed ({case.quote.error}).")
     parts.append(_next_step(case))
     return " ".join(part for part in parts if part)
+
+
+def _stale_warning(symbol: Symbol, freshness: Freshness) -> ToolWarning:
+    """The shared STALE_DATA warning without its advice to run check_symbol: this already is check_symbol."""
+    shared = stale_warning(symbol, freshness)
+    return shared.model_copy(update={"message": shared.message.split(" Run check_symbol", 1)[0]})
 
 
 def _quote_warning(symbol: Symbol, quote: _QuoteProbe) -> ToolWarning:
@@ -879,7 +979,8 @@ async def check_symbol(
     status = _status(bars, freshness, quote)
     successors = _Successors()
     if status != "ok" and find_successor:
-        successors = await _find_successors(deps, symbol, now, responses)
+        # A line with current bars is not delisted, so only a dead one is looked up in the delisted list.
+        successors = await _find_successors(deps, symbol, now, responses, delisted_too=status != "no_quote")
 
     case = _Case(symbol, status, freshness, window, quote, successors)
     data = {
@@ -897,18 +998,13 @@ async def check_symbol(
     warnings: list[ToolWarning] = []
     notes: list[str] = []
     if status == "stale":
-        warnings.append(stale_warning(symbol, freshness))
+        warnings.append(_stale_warning(symbol, freshness))
         notes.append(
             "Freshness is judged on the exchange's weekday calendar. Holidays are not modelled, so a "
             "closure of several days can look stale."
         )
     if quote is not None and quote.status in {"no_quote", "missing"}:
         warnings.append(_quote_warning(symbol, quote))
-    if successors.borrowed_from:
-        notes.append(
-            f"The name and ISIN come from {successors.borrowed_from}, a line with the same code on another "
-            "exchange; confirm it is the same company."
-        )
     return build_response(data, responses, warnings=warnings, notes=notes)
 
 
@@ -1046,8 +1142,8 @@ def register(server: MCPServer, deps: Deps) -> None:
             bool,
             Field(
                 description=(
-                    "When the code looks dead, search by code and then by company name for a successor "
-                    "(up to 2 more API calls)."
+                    "When the code looks dead, find the line's name (in search, else in the exchange's "
+                    "delisted list) and search that name for a successor (up to 3 more API calls)."
                 )
             ),
         ] = True,
