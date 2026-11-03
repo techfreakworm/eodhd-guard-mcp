@@ -116,6 +116,18 @@ The pull request template has the same list.
 - [ ] `CHANGELOG.md` has a line under "Unreleased".
 - [ ] No API keys, account details or private paths appear in the diff, in logs, or in the description.
 
+## Releases
+
+Releases are automatic. `.github/workflows/release.yml` runs after CI passes on a push to `main`, and it publishes only when `__version__` in `src/eodhd_guard_mcp/__init__.py` has no tag and no PyPI release yet. It builds the package, publishes it to PyPI by trusted publishing (OIDC, the `pypi` environment, no stored token), creates the `v<version>` tag and GitHub release, and lists the server in the MCP registry from `server.json` (GitHub OIDC).
+
+To release:
+
+1. Bump `__version__` in `src/eodhd_guard_mcp/__init__.py` and both `version` fields in `server.json`, the top-level one and the one under `packages`. A unit test and `scripts/release_version.py` check that they match.
+2. Move the "Unreleased" entries in `CHANGELOG.md` under a heading for the new version.
+3. Push to `main`.
+
+Nothing is published unless the repository variable `RELEASE_ENABLED` is `true`. The registry finds the package by the `<!-- mcp-name: ... -->` line under the title in `README.md`, so leave it there.
+
 ## Never paste API keys
 
 Do not put an API key in an issue, a pull request, a commit message, a test, a log, a screenshot or a chat. The same goes for account details such as your name, email address or payment method.

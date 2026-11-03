@@ -5,7 +5,7 @@
 A guard-first [MCP](https://modelcontextprotocol.io) server for the [EODHD](https://eodhd.com) market-data API: it catches silent failures, says what each price is, and counts what every call costs.
 
 [![CI](https://github.com/techfreakworm/eodhd-guard-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/techfreakworm/eodhd-guard-mcp/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
 **Status: alpha (0.1.x).** Tool names, parameters and output fields can still change before 1.0.
@@ -23,7 +23,7 @@ EODHD is a broad, inexpensive market-data API. An evaluation in October 2026 (ab
 - **Lateness.** Quotes are 15 to 20 minutes delayed. Intraday bars for the current session are not available. End-of-day bars appear anywhere from 10 minutes (US) to 4.5 hours (India) after the close.
 - **Cost.** Every endpoint has a price in API calls (end-of-day 1, intraday 5, fundamentals 10), so an unattended agent can spend a day's allowance in minutes.
 
-This server has 14 tools, and every one has guards. It validates arguments before sending anything, turns empty and placeholder answers into errors or explicit warnings, says whether each price is raw or adjusted and how old it is, states the cost of every response, counts every call in a local ledger, and stops at a daily budget. Each caveat is explained in [docs/caveats.md](docs/caveats.md).
+This server has 14 tools, and every one has guards. It validates arguments before sending anything, turns empty and placeholder answers into errors or explicit warnings, says whether each price is raw or adjusted and how old it is, states the cost of every response, counts every call in a local ledger, and stops at a daily budget. Each caveat is explained in [docs/caveats.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/docs/caveats.md).
 
 ## Requirements
 
@@ -123,7 +123,7 @@ With the key inline, which is easier but leaves it in your shell history and in 
 claude mcp add eodhd-guard --env EODHD_API_KEY=... -- eodhd-guard-mcp
 ```
 
-[examples/claude_code.md](examples/claude_code.md) has the full walk-through, including `uvx`, user scope and a lower budget.
+[examples/claude_code.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/examples/claude_code.md) has the full walk-through, including `uvx`, user scope and a lower budget.
 
 ### Claude Desktop
 
@@ -159,7 +159,7 @@ Claude Desktop does not always see the `PATH` of your shell. If it cannot find t
 }
 ```
 
-The same file is in [examples/claude_desktop_config.json](examples/claude_desktop_config.json).
+The same file is in [examples/claude_desktop_config.json](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/examples/claude_desktop_config.json).
 
 ### Any other stdio client
 
@@ -650,11 +650,11 @@ The server keeps two SQLite files in its state directory. The directory is `EODH
 - The streamable-HTTP transport has no authentication. It binds to `127.0.0.1` by default.
 - Names and descriptions in results come from EODHD. Treat them as data, not as instructions.
 
-To report a vulnerability, follow [SECURITY.md](SECURITY.md). Do not open a public issue for it.
+To report a vulnerability, follow [SECURITY.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/SECURITY.md). Do not open a public issue for it.
 
 ## Data caveats
 
-[docs/caveats.md](docs/caveats.md) lists the quirks of EODHD's data that this server guards against, with what was observed in October and November 2026 and what the server does about each: coverage gaps, frozen codes, `"NA"` quotes, ignored parameters, raw and adjusted prices, spin-offs, NSE closes, filler bars, publication lag, intraday and quote delays, fundamentals, calendars, delisted names and holiday handling.
+[docs/caveats.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/docs/caveats.md) lists the quirks of EODHD's data that this server guards against, with what was observed in October and November 2026 and what the server does about each: coverage gaps, frozen codes, `"NA"` quotes, ignored parameters, raw and adjusted prices, spin-offs, NSE closes, filler bars, publication lag, intraday and quote delays, fundamentals, calendars, delisted names and holiday handling.
 
 ## Compared with EODHD's official MCP server
 
@@ -690,7 +690,7 @@ Use the official server for breadth. Use this one for prices, quotes, fundamenta
 
 ## Development
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, running the tests, the fixture policy (synthetic data only, never real EODHD responses) and how to add a tool. The design of every module, tool and warning code is in [docs/DESIGN.md](docs/DESIGN.md). Changes are listed in [CHANGELOG.md](CHANGELOG.md). Everyone taking part is expected to follow the [code of conduct](CODE_OF_CONDUCT.md).
+[CONTRIBUTING.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/CONTRIBUTING.md) covers setup, running the tests, the fixture policy (synthetic data only, never real EODHD responses), how to add a tool and how a release is made. The design of every module, tool and warning code is in [docs/DESIGN.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/docs/DESIGN.md). Changes are listed in [CHANGELOG.md](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/CHANGELOG.md). Everyone taking part is expected to follow the [code of conduct](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/CODE_OF_CONDUCT.md).
 
 ```bash
 pip install -e ".[dev]"
@@ -702,4 +702,4 @@ The suite has more than 2,000 tests and covers more than 99% of the code (CI fai
 
 ## Licence
 
-[MIT](LICENSE). The licence covers this code only. It does not cover EODHD's data, which has its own terms.
+[MIT](https://github.com/techfreakworm/eodhd-guard-mcp/blob/main/LICENSE). The licence covers this code only. It does not cover EODHD's data, which has its own terms.
