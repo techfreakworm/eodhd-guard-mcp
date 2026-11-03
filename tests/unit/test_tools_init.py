@@ -69,3 +69,20 @@ def test_every_tool_is_annotated_read_only() -> None:
     assert READ_ONLY.read_only_hint is True
     assert READ_ONLY.destructive_hint is False
     assert READ_ONLY.open_world_hint is True
+
+
+async def test_an_unreadable_ledger_costs_the_warning_and_never_the_result(
+    deps: Deps, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def locked() -> dict[str, object]:
+        raise GuardError(ErrorCode.CONFIG_ERROR, "The usage ledger is locked by another process.")
+
+    @guarded(deps)
+    async def tool() -> ToolResponse:
+        return build_response({"paid": True}, [])
+
+    monkeypatch.setattr(deps.budget, "status", locked)
+    result = await tool()
+    assert result.data == {"paid": True}
+    assert result.warnings == []
+    assert "Skipped the budget check" in caplog.text

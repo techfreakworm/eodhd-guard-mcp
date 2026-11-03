@@ -8,6 +8,7 @@ successful results.
 from __future__ import annotations
 
 import functools
+import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, ParamSpec
 
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from eodhd_guard_mcp.server import Deps
 
 P = ParamSpec("P")
+
+logger = logging.getLogger(__name__)
 
 READ_ONLY = ToolAnnotations(
     read_only_hint=True,
@@ -48,7 +51,13 @@ def guarded(
                 result = await fn(*args, **kwargs)
             except GuardError as exc:
                 raise ToolError(redact(str(exc), [deps.settings.api_key])) from None
-            budget_warning = budget_low_warning(deps)
+            # The call has succeeded and may have been paid for: a ledger that can't be read now (say,
+            # locked by another process) must cost the warning, never the result.
+            try:
+                budget_warning = budget_low_warning(deps)
+            except GuardError as exc:
+                logger.warning("Skipped the budget check after a successful call: %s", exc.message)
+                budget_warning = None
             if budget_warning is not None:
                 result.warnings.append(budget_warning)
             return result
